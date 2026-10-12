@@ -91,15 +91,19 @@ class FakeMessages:
             block = SimpleNamespace(type="tool_use", id="tu_1", name="registrar_movimientos", input={
                 "movimientos": [{"tipo": "gasto", "monto": 25000, "descripcion": "Mercado",
                                  "categoria": "supermercado"}]})
-            return SimpleNamespace(stop_reason="tool_use", content=[block])
-        return SimpleNamespace(stop_reason="end_turn",
+            return SimpleNamespace(stop_reason="tool_use", content=[block], usage=USAGE)
+        return SimpleNamespace(stop_reason="end_turn", usage=USAGE,
                                content=[SimpleNamespace(type="text", text="Anotado: $25.000 en 🛒 Supermercado")])
+
+
+USAGE = SimpleNamespace(input_tokens=1000, output_tokens=200, cache_read_input_tokens=3000,
+                        cache_creation_input_tokens=0)
 
 
 def test_assistant_tool_loop(monkeypatch, repo, tg, profile):
     fake = FakeMessages()
     monkeypatch.setattr(assistant, "_client", lambda: SimpleNamespace(beta=SimpleNamespace(messages=fake)))
-    bot.handle_conversation(tg, repo, profile, 1, "gasté 25 mil en el mercado")
+    bot.handle_conversation(tg, repo, profile, 1, "ayer gasté 25 mil en el mercado")
     assert tg.sent[0]["text"].startswith("Anotado")
     assert tg.sent[0]["keyboard"][0][1]["callback_data"].startswith("u:")
     tool_turn = fake.calls[1]["messages"][2]  # usuario, asistente (tool_use), resultados
@@ -107,6 +111,8 @@ def test_assistant_tool_loop(monkeypatch, repo, tg, profile):
     assert json.loads(tool_turn["content"][0]["content"])["registrados"][0]["monto"] == 25000.0
     assert fake.calls[0]["model"].startswith("anthropic.")
     assert [m[1] for m in repo.messages] == ["user", "assistant"]
+    month = profile.stats["consumo"][next(iter(profile.stats["consumo"]))]
+    assert month["llm_calls"] == 1 and month["input"] == 2000 and month["cache_read"] == 6000
 
 
 def test_assistant_offline_fallback(monkeypatch, repo, profile, now):

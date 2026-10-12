@@ -55,3 +55,27 @@ def quick_parse(text: str, learned: dict[str, str] | None = None) -> QuickEntry 
     else:
         category = categories.guess(rest, learned)
     return QuickEntry("income" if is_income else "expense", amount, category, rest[:120])
+
+
+# Palabras que indican algo más que "un gasto de hoy": fechas, recurrencias, correcciones o preguntas.
+_NEEDS_MODEL = re.compile(
+    r"\b(ayer|anteayer|antier|semana|mes|lunes|martes|miercoles|jueves|viernes|sabado|domingo|"
+    r"cada|mensual|semanal|anual|suscripcion|presupuesto|tope|no|borra|elimina|corrige|cambia|"
+    r"cuanto|cuanta|deberia|puedo|alcanza|dolares|euros|usd|eur|millon|millones|palo|palos|medio)\b|\?|\d{1,2}/\d{1,2}"
+)
+
+
+def confident_parse(text: str, learned: dict[str, str] | None = None) -> QuickEntry | None:
+    """Solo devuelve un movimiento cuando la frase es inequívoca; si no, decide el modelo.
+
+    Ahorra llamadas a la IA en el caso más frecuente ("gasté 12 mil en uber").
+    """
+    norm = categories.normalize(text)
+    if len(norm.split()) > 10 or _NEEDS_MODEL.search(norm):
+        return None
+    if len(_AMOUNT.findall(norm)) != 1:
+        return None
+    entry = quick_parse(text, learned)
+    if entry is None or entry.category in ("otros", "otros_ingresos"):
+        return None
+    return entry

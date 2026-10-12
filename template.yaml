@@ -13,16 +13,18 @@ Parameters:
     Description: Nombre del parámetro SSM (SecureString) con el secreto del webhook
   ModelId:
     Type: String
-    Default: anthropic.claude-opus-5-5
+    Default: anthropic.claude-haiku-5-5
+    Description: Haiku 5.5 es la opción económica. Para más calidad, anthropic.claude-sonnet-5-5 (~20x más caro).
   FallbackModelId:
     Type: String
-    Default: anthropic.claude-opus-4-8
+    Default: anthropic.claude-sonnet-5-5
+    Description: Solo se usa si el modelo principal rechaza una petición (poco frecuente).
   BedrockRegion:
     Type: String
     Default: us-east-1
   LlmEffort:
     Type: String
-    Default: medium
+    Default: low
     AllowedValues: [low, medium, high]
   DefaultCurrency:
     Type: String
@@ -34,19 +36,40 @@ Parameters:
     Type: String
     Default: es-US
     AllowedValues: [es-US, es-ES]
+  AllowedUserIds:
+    Type: String
+    Default: ""
+    Description: IDs de Telegram separados por coma que pueden usar el bot (vacío = cualquiera). Muy recomendado.
+  DailyLlmLimit:
+    Type: Number
+    Default: 80
+    Description: Máximo de mensajes con IA por usuario y día.
+  MonthlyBudgetUsd:
+    Type: Number
+    Default: 5
+    Description: Presupuesto mensual de AWS para la alarma por correo.
+  BudgetEmail:
+    Type: String
+    Default: ""
+    Description: Correo para la alarma de presupuesto (vacío = sin alarma).
+  LogRetentionDays:
+    Type: Number
+    Default: 14
   DailyScheduleUtc:
     Type: String
     Default: cron(0 12 * * ? *)
     Description: Hora de la tarea diaria (UTC). 12:00 UTC = 7:00 en Bogotá/Lima.
 
+Conditions:
+  HasBudgetEmail: !Not [!Equals [!Ref BudgetEmail, ""]]
+
 Globals:
   Function:
     Runtime: python3.12
     Architectures: [arm64]
-    MemorySize: 512
+    MemorySize: 256
     Timeout: 30
     CodeUri: src/
-    Tracing: Active
     Environment:
       Variables:
         TABLE_NAME: !Ref Table
@@ -54,6 +77,7 @@ Globals:
         WEBHOOK_SECRET_PARAM: !Ref WebhookSecretParam
         DEFAULT_CURRENCY: !Ref DefaultCurrency
         DEFAULT_TIMEZONE: !Ref DefaultTimezone
+        ALLOWED_USER_IDS: !Ref AllowedUserIds
 
 Resources:
   # ---------------------------------------------------------------- datos
@@ -125,7 +149,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       Handler: cuentas.handlers.webhook.handler
-      MemorySize: 256
+      MemorySize: 128
       Timeout: 10
       Environment:
         Variables:
@@ -189,7 +213,7 @@ Resources:
     Properties:
       Handler: cuentas.handlers.processor.handler
       Timeout: 120
-      MemorySize: 1024
+      MemorySize: 512
       Environment:
         Variables:
           AUDIO_BUCKET: !Ref AudioBucket
@@ -198,6 +222,7 @@ Resources:
           FALLBACK_MODEL_ID: !Ref FallbackModelId
           BEDROCK_REGION: !Ref BedrockRegion
           LLM_EFFORT: !Ref LlmEffort
+          DAILY_LLM_LIMIT: !Ref DailyLlmLimit
           TRANSCRIBE_LANGUAGE: !Ref TranscribeLanguage
       Policies:
         - DynamoDBCrudPolicy: { TableName: !Ref Table }
@@ -233,7 +258,7 @@ Resources:
     Properties:
       Handler: cuentas.handlers.transcribe_done.handler
       Timeout: 120
-      MemorySize: 1024
+      MemorySize: 512
       Environment:
         Variables:
           AUDIO_BUCKET: !Ref AudioBucket
@@ -242,6 +267,7 @@ Resources:
           FALLBACK_MODEL_ID: !Ref FallbackModelId
           BEDROCK_REGION: !Ref BedrockRegion
           LLM_EFFORT: !Ref LlmEffort
+          DAILY_LLM_LIMIT: !Ref DailyLlmLimit
           TRANSCRIBE_LANGUAGE: !Ref TranscribeLanguage
       Policies:
         - DynamoDBCrudPolicy: { TableName: !Ref Table }
@@ -288,6 +314,7 @@ Resources:
           FALLBACK_MODEL_ID: !Ref FallbackModelId
           BEDROCK_REGION: !Ref BedrockRegion
           LLM_EFFORT: !Ref LlmEffort
+          DAILY_LLM_LIMIT: !Ref DailyLlmLimit
           TRANSCRIBE_LANGUAGE: !Ref TranscribeLanguage
       Policies:
         - DynamoDBCrudPolicy: { TableName: !Ref Table }
@@ -370,6 +397,53 @@ Resources:
             AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
             CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # Managed-CachingDisabled
             OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac # Managed-AllViewerExceptHostHeader
+
+  # ---------------------------------------------------------------- costos
+  # Sin esto, CloudWatch guarda los logs para siempre (y se cobran).
+  WebhookFunctionLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${WebhookFunction}
+      RetentionInDays: !Ref LogRetentionDays
+
+  ApiFunctionLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ApiFunction}
+      RetentionInDays: !Ref LogRetentionDays
+
+  ProcessorFunctionLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ProcessorFunction}
+      RetentionInDays: !Ref LogRetentionDays
+
+  TranscribeDoneFunctionLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${TranscribeDoneFunction}
+      RetentionInDays: !Ref LogRetentionDays
+
+  SchedulerFunctionLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${SchedulerFunction}
+      RetentionInDays: !Ref LogRetentionDays
+
+  CostBudget:
+    Type: AWS::Budgets::Budget
+    Condition: HasBudgetEmail
+    Properties:
+      Budget:
+        BudgetName: !Sub ${AWS::StackName}-mensual
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit: { Amount: !Ref MonthlyBudgetUsd, Unit: USD }
+      NotificationsWithSubscribers:
+        - Notification: { NotificationType: ACTUAL, ComparisonOperator: GREATER_THAN, Threshold: 80 }
+          Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref BudgetEmail }]
+        - Notification: { NotificationType: FORECASTED, ComparisonOperator: GREATER_THAN, Threshold: 100 }
+          Subscribers: [{ SubscriptionType: EMAIL, Address: !Ref BudgetEmail }]
 
 Outputs:
   WebhookUrl:

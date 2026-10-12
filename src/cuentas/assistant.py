@@ -17,7 +17,7 @@ from .models import Transaction
 from .tools import TOOLS, ToolExecutor, ToolInputError
 
 log = logging.getLogger(__name__)
-MAX_STEPS = 8
+MAX_STEPS = 5
 
 SYSTEM_PROMPT = """Eres "Cuentas", el contador personal del usuario dentro de Telegram. Llevas sus finanzas: \
 registras gastos e ingresos, clasificas cada gasto, controlas suscripciones y presupuestos, avisas de gastos \
@@ -56,6 +56,7 @@ class AssistantResult:
     text: str
     alerts: list[Alert] = field(default_factory=list)
     recorded: list[Transaction] = field(default_factory=list)
+    tokens: dict[str, int] = field(default_factory=dict)
 
 
 @lru_cache(maxsize=1)
@@ -65,7 +66,7 @@ def _client() -> AnthropicBedrockMantle:
         aws_region=config.BEDROCK_REGION,
         timeout=60,
         max_retries=2,
-        # Si el modelo principal rechaza por política, el SDK reintenta con el de respaldo.
+        # Si el modelo principal rechaza por política, el SDK reintenta con el de respaldo (raro en este uso).
         middleware=[BetaRefusalFallbackMiddleware([{"model": config.FALLBACK_MODEL_ID}])],
     )
 
@@ -94,26 +95,37 @@ def reply(ledger: Ledger, user_text: str, source: str = "text",
             {"type": "text", "text": user_text},
         ],
     }]
+    tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
     try:
         with BetaFallbackState():
-            text = _loop(messages, executor)
+            text = _loop(messages, executor, tokens)
     except (anthropic.APIConnectionError, anthropic.APIStatusError) as exc:
         log.exception("Fallo llamando al modelo: %s", exc)
         text = _offline_reply(ledger, executor, user_text)
-    return AssistantResult(text=text, alerts=executor.alerts, recorded=executor.recorded)
+    return AssistantResult(text=text, alerts=executor.alerts, recorded=executor.recorded, tokens=tokens)
 
 
-def _loop(messages: list[dict[str, Any]], executor: ToolExecutor) -> str:
+def _add_usage(tokens: dict[str, int], usage: Any) -> None:
+    if usage is None:
+        return
+    tokens["input"] += getattr(usage, "input_tokens", 0) or 0
+    tokens["output"] += getattr(usage, "output_tokens", 0) or 0
+    tokens["cache_read"] += getattr(usage, "cache_read_input_tokens", 0) or 0
+    tokens["cache_write"] += getattr(usage, "cache_creation_input_tokens", 0) or 0
+
+
+def _loop(messages: list[dict[str, Any]], executor: ToolExecutor, tokens: dict[str, int]) -> str:
     client = _client()
     for _ in range(MAX_STEPS):
         response = client.beta.messages.create(
             model=config.MODEL_ID,
-            max_tokens=4096,
+            max_tokens=config.LLM_MAX_TOKENS,
             system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
             tools=TOOLS,
             messages=messages,
             output_config={"effort": config.LLM_EFFORT},
         )
+        _add_usage(tokens, getattr(response, "usage", None))
         if response.stop_reason == "refusal":
             return "No puedo ayudarte con eso. Si es sobre tus finanzas, intenta decirlo de otra forma."
         # Se reenvía el contenido completo (incluidos bloques de razonamiento) sin modificarlo.

@@ -70,21 +70,49 @@ Requisitos: AWS CLI, [SAM CLI](https://docs.aws.amazon.com/serverless-applicatio
    make all STACK=cuentas-bot REGION=us-east-1
    # equivale a: sam build && sam deploy ... && subir webapp/ a S3 && registrar webhook, comandos y botón de menú
    ```
-   Parámetros útiles (`sam deploy --parameter-overrides ...`): `DefaultCurrency` (ej. `COP`, `MXN`, `EUR`), `DefaultTimezone`, `TranscribeLanguage` (`es-US` o `es-ES`), `ModelId`, `LlmEffort`, `DailyScheduleUtc`.
+   Parámetros útiles (`sam deploy --parameter-overrides ...`): **`AllowedUserIds`** (tu ID de Telegram), **`BudgetEmail`**, `MonthlyBudgetUsd`, `DefaultCurrency` (ej. `COP`, `MXN`, `EUR`), `DefaultTimezone`, `TranscribeLanguage` (`es-US` o `es-ES`), `ModelId`, `LlmEffort`, `DailyLlmLimit`, `DailyScheduleUtc`. Por ejemplo:
+   ```bash
+   make all PARAMS="AllowedUserIds=123456789 BudgetEmail=tu@correo.com DefaultCurrency=COP"
+   ```
 5. Escríbele `/start` a tu bot.
 
 Cada usuario puede cambiar su moneda, zona horaria, ingreso, día de pago y meta de ahorro hablándole al bot ("gano 4 millones y me pagan el 30") o desde *Ajustes* en la Mini App.
 
 ### Modelo
 
-Por defecto usa `anthropic.claude-opus-5-5` mediante el cliente `AnthropicBedrockMantle` del SDK oficial de Anthropic, con esfuerzo `medium` (parámetro `LlmEffort`). Tiene activado un **respaldo ante rechazos** (`BetaRefusalFallbackMiddleware`, modelo `FallbackModelId`): si el modelo principal declina una petición por política, el SDK la reintenta con el de respaldo. El rol de las Lambdas tiene `bedrock-mantle:CreateInference`.
+Por defecto usa **Claude Haiku 5.5** (`anthropic.claude-haiku-5-5`) con esfuerzo `low`, mediante el cliente `AnthropicBedrockMantle` del SDK oficial de Anthropic. Para registrar y clasificar gastos sobra, y cuesta una fracción de Sonnet u Opus. Si algún día quieres respuestas más elaboradas, cambia `ModelId` a `anthropic.claude-sonnet-5-5` sin tocar código. Hay un respaldo ante rechazos (`FallbackModelId`) que solo actúa si el modelo principal declina una petición. El rol de las Lambdas tiene `bedrock-mantle:CreateInference`.
+
+## Costos 💸
+
+El bot está diseñado para costar alrededor de **1 USD al mes** con uso personal. Estimación para 1 persona con ~300 mensajes al mes (10 al día) y ~100 notas de voz cortas:
+
+| Concepto | Cálculo aproximado | USD/mes |
+|---|---|---|
+| IA (Haiku 5.5) | ~180 conversaciones × ~$0,001 (el resto va por registro rápido sin IA) | ~0,20 |
+| Transcripción | 100 audios × mínimo 15 s ≈ 30 min × $0,024 | ~0,70 (gratis los primeros 12 meses hasta 60 min/mes) |
+| Lambda, SQS, DynamoDB, S3, CloudFront | dentro de la capa gratuita con este volumen | ~0 |
+| API Gateway, CloudWatch Logs, PITR | centavos | ~0,05 |
+| **Total** | | **~1** |
+
+Con Opus 5.5 la parte de IA subiría a ~7 USD/mes; con Sonnet 5.5, a ~3,5 USD/mes. Son tarifas de lista de Anthropic; **Bedrock publica las suyas** ([precios de Bedrock](https://aws.amazon.com/bedrock/pricing/)), así que verifícalas para tu región.
+
+Lo que mantiene el costo bajo:
+
+- **Registro rápido sin IA.** Las frases inequívocas como *"gasté 12 mil en uber"* se registran con un parser y lo aprendido de tus comercios, sin llamar al modelo. Si hay fechas, varias cifras, preguntas, correcciones o una categoría dudosa, decide la IA.
+- **Modelo barato + caché.** Haiku 5.5 con esfuerzo bajo; las instrucciones y herramientas se cachean, así que la segunda llamada de cada conversación lee de caché (10 % del precio).
+- **Lista de usuarios permitidos (`AllowedUserIds`).** Cualquiera puede encontrar tu bot en Telegram. Con la lista, los mensajes de desconocidos se descartan en el webhook, antes de la cola y de la IA. **Configúrala con tu ID** (te lo da [@userinfobot](https://t.me/userinfobot)).
+- **Tope diario (`DailyLlmLimit`, 80 por defecto).** Al llegar al tope, la IA se pausa hasta el día siguiente; el registro rápido sigue funcionando.
+- **Audios de máximo 2 minutos**, y se borran apenas se transcriben.
+- **Alarma de presupuesto de AWS (`BudgetEmail`, `MonthlyBudgetUsd`).** Te escribe al 80 % del gasto real y si la proyección supera el presupuesto (5 USD por defecto).
+- **Logs con retención de 14 días**, Lambdas ARM con poca memoria y sin X-Ray.
+- **`/consumo`** muestra en el chat los mensajes con IA, los tokens, los minutos de audio y el costo estimado del mes.
 
 ## Desarrollo local
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt
-make test      # pytest (finanzas, herramientas, aprendizaje, auth de la Mini App, scheduler, bucle del asistente)
+make test      # pytest (finanzas, herramientas, aprendizaje, costos, auth de la Mini App, scheduler, bucle del asistente)
 make lint      # cfn-lint del template
 ```
 

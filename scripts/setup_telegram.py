@@ -49,6 +49,7 @@ def main() -> None:
         {"command": "dashboard", "description": "Abrir el dashboard completo"},
         {"command": "suscripciones", "description": "Pagos recurrentes"},
         {"command": "deshacer", "description": "Borrar el último movimiento"},
+        {"command": "consumo", "description": "Cuánto cuesta el bot este mes"},
         {"command": "ayuda", "description": "Qué puedo hacer"},
     ])
     call(token, "setChatMenuButton",

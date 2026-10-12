@@ -1,5 +1,6 @@
 STACK ?= cuentas-bot
 REGION ?= us-east-1
+PARAMS ?=
 
 .PHONY: test lint build deploy web telegram all
 
@@ -14,7 +15,8 @@ build:
 
 deploy: build
 	sam deploy --stack-name $(STACK) --region $(REGION) --capabilities CAPABILITY_IAM \
-		--resolve-s3 --no-fail-on-empty-changeset
+		--resolve-s3 --no-fail-on-empty-changeset \
+		$(if $(PARAMS),--parameter-overrides $(PARAMS),)
 
 # Sube la Mini App al bucket y limpia la caché de CloudFront.
 web:

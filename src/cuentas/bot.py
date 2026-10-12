@@ -5,7 +5,7 @@ import html
 import logging
 from typing import Any
 
-from . import assistant, categories, config, finance, learning
+from . import assistant, categories, config, finance, learning, parsing, usage
 from .finance import Alert, fmt
 from .ledger import Ledger
 from .models import Profile, Transaction
@@ -23,7 +23,7 @@ HELP = (
     "• <i>¿Cuánto llevo en restaurantes este mes?</i>\n"
     "• <i>¿Debería salir hoy?</i>\n"
     "• <i>Ponme un tope de 400 mil en ocio</i>\n\n"
-    "Comandos: /resumen /suscripciones /dashboard /deshacer /ayuda"
+    "Comandos: /resumen /suscripciones /dashboard /deshacer /consumo /ayuda"
 )
 
 
@@ -62,18 +62,50 @@ def send_alerts(tg: Telegram, chat_id: int, alerts: list[Alert]) -> None:
 def handle_conversation(tg: Telegram, repo: Repository, profile: Profile, chat_id: int, text: str,
                         source: str = "text", reply_to: int | None = None) -> None:
     """Pasa el mensaje (escrito o transcrito) al asistente y envía su respuesta."""
-    tg.typing(chat_id)
     learning.observe_input(profile, "voice" if source == "voice" else "text")
     ledger = Ledger(repo, profile)
+    if config.FAST_PATH and fast_record(tg, ledger, chat_id, text, source, reply_to):
+        repo.save_profile(profile)
+        return
+    if not usage.llm_allowed(profile.stats, ledger.today):
+        repo.save_profile(profile)
+        tg.send(chat_id, f"Llegaste al límite diario de {config.DAILY_LLM_LIMIT} consultas con IA 🛑 "
+                         "(es para cuidar tus costos). Mañana sigo; mientras tanto puedo registrar frases "
+                         "simples como <i>gasté 12 mil en uber</i>.", reply_to=reply_to)
+        return
+    tg.typing(chat_id)
     history = repo.recent_messages(profile.user_id, config.HISTORY_TURNS * 2)
     result = assistant.reply(ledger, text, source=source, history=history)
-    if not result.recorded:
-        repo.save_profile(profile)  # persistir contadores de uso (record() ya guarda si hubo registros)
+    if any(result.tokens.values()):
+        usage.add_llm(profile.stats, ledger.today, result.tokens)
+    repo.save_profile(profile)
     keyboard = tx_keyboard(result.recorded[-1]) if len(result.recorded) == 1 else None
     tg.send(chat_id, result.text, keyboard=keyboard, reply_to=reply_to)
     send_alerts(tg, chat_id, result.alerts)
     repo.add_message(profile.user_id, "user", text)
     repo.add_message(profile.user_id, "assistant", result.text)
+
+
+def fast_record(tg: Telegram, ledger: Ledger, chat_id: int, text: str, source: str,
+                reply_to: int | None) -> bool:
+    """Registra sin IA las frases inequívocas. Devuelve False si hace falta el modelo."""
+    profile = ledger.profile
+    entry = parsing.confident_parse(text, profile.merchant_categories)
+    if entry is None:
+        return False
+    merchant = entry.description if len(entry.description.split()) <= 3 else ""
+    tx = Transaction(user_id=profile.user_id, kind=entry.kind, amount=entry.amount, category=entry.category,
+                     description=entry.description.capitalize(), merchant=merchant, date=ledger.today.isoformat(),
+                     necessity=categories.default_necessity(entry.category), source=source)
+    alerts = ledger.record(tx)
+    usage.add_fast(profile.stats, ledger.today)
+    verb = "Ingreso" if tx.kind == "income" else "Gasto"
+    tg.send(chat_id, f"✅ {verb}: <b>{fmt(tx.amount, profile.currency)}</b> · {categories.label(tx.category)}\n"
+                     f"<i>{html.escape(tx.description)}</i>", keyboard=tx_keyboard(tx), reply_to=reply_to)
+    send_alerts(tg, chat_id, alerts)
+    ledger.repo.add_message(profile.user_id, "user", text)
+    ledger.repo.add_message(profile.user_id, "assistant", f"Registré {verb.lower()} de {tx.amount} en {tx.category}")
+    return True
 
 
 def handle_command(tg: Telegram, repo: Repository, profile: Profile, chat_id: int, command: str,
@@ -99,6 +131,9 @@ def handle_command(tg: Telegram, repo: Repository, profile: Profile, chat_id: in
         subs = repo.list_subscriptions(profile.user_id)
         tg.send(chat_id, finance.summary_text(profile, ledger.month_transactions(), subs, ledger.today),
                 keyboard=webapp_button("📊 Ver dashboard completo"))
+        return True
+    if cmd == "/consumo":
+        tg.send(chat_id, usage.usage_text(profile.stats, ledger.today))
         return True
     if cmd == "/dashboard":
         tg.send(chat_id, "Tu dashboard con gráficas, presupuestos y movimientos:", keyboard=webapp_button())

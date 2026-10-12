@@ -28,6 +28,9 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
         return {"statusCode": 200, "body": "ignored"}
 
     source = update.get("message") or update.get("edited_message") or update.get("callback_query") or {}
+    sender = (source.get("from") or {}).get("id")
+    if config.ALLOWED_USER_IDS and sender not in config.ALLOWED_USER_IDS:
+        return {"statusCode": 200, "body": "ignored"}  # ni cola ni Lambda para desconocidos
     group = (source.get("chat") or source.get("message", {}).get("chat") or source.get("from") or {}).get("id", 0)
     sqs.send_message(
         QueueUrl=config.UPDATES_QUEUE_URL,

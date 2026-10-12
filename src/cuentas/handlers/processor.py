@@ -7,14 +7,14 @@ from typing import Any
 
 import boto3
 
-from .. import bot, config
+from .. import bot, config, finance, usage
 from ..repository import Repository
 from ..telegram import Telegram
 
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 
-MAX_AUDIO_SECONDS = 300
+MAX_AUDIO_SECONDS = 120  # audios largos = más costo de transcripción
 MEDIA_FORMATS = {
     "audio/ogg": "ogg", "audio/opus": "ogg", "audio/mpeg": "mp3", "audio/mp3": "mp3",
     "audio/mp4": "mp4", "audio/x-m4a": "mp4", "audio/m4a": "mp4", "video/mp4": "mp4",
@@ -55,7 +55,18 @@ def _chat_id(update: dict[str, Any]) -> int | None:
     return (msg.get("chat") or {}).get("id")
 
 
+def is_allowed(user_id: int) -> bool:
+    return not config.ALLOWED_USER_IDS or user_id in config.ALLOWED_USER_IDS
+
+
 def process_update(repo: Repository, tg: Telegram, update: dict[str, Any]) -> None:
+    sender = (update.get("message") or update.get("callback_query") or {}).get("from") or {}
+    if sender and not is_allowed(sender.get("id", 0)):
+        # Bot privado: no se crea perfil ni se gasta en IA para desconocidos.
+        log.info("Usuario no autorizado: %s", sender.get("id"))
+        if "message" in update and update["message"].get("chat", {}).get("type") == "private":
+            tg.send(update["message"]["chat"]["id"], "Este bot es privado 🔒")
+        return
     if "callback_query" in update:
         bot.handle_callback(tg, repo, update["callback_query"])
         return
@@ -80,8 +91,10 @@ def process_update(repo: Repository, tg: Telegram, update: dict[str, Any]) -> No
         if kind in message:
             media = message[kind]
             media_format = MEDIA_FORMATS.get(media.get("mime_type", ""), default_format)
-            start_transcription(tg, profile.user_id, chat_id, message["message_id"], update["update_id"],
-                                media, media_format)
+            if start_transcription(tg, profile.user_id, chat_id, message["message_id"], update["update_id"],
+                                   media, media_format):
+                usage.add_audio(profile.stats, finance.today_for(profile), media.get("duration", 0))
+                repo.save_profile(profile)
             return
     if is_new:
         bot.handle_command(tg, repo, profile, chat_id, "/start", is_new)
@@ -90,13 +103,13 @@ def process_update(repo: Repository, tg: Telegram, update: dict[str, Any]) -> No
 
 
 def start_transcription(tg: Telegram, user_id: int, chat_id: int, message_id: int, update_id: int,
-                        media: dict[str, Any], media_format: str) -> None:
+                        media: dict[str, Any], media_format: str) -> bool:
     if media.get("duration", 0) > MAX_AUDIO_SECONDS:
-        tg.send(chat_id, "Ese audio es muy largo 😅. Mándame audios de menos de 5 minutos.")
-        return
+        tg.send(chat_id, f"Ese audio es muy largo 😅. Mándame audios de menos de {MAX_AUDIO_SECONDS} segundos.")
+        return False
     if not media_format:
         tg.send(chat_id, "No puedo escuchar ese formato de audio. Prueba con una nota de voz.")
-        return
+        return False
     tg.typing(chat_id, "record_voice")
     audio = tg.download_file(media["file_id"])
     job_name = f"cuentas_{user_id}_{chat_id}_{message_id}_{update_id}"
@@ -111,3 +124,4 @@ def start_transcription(tg: Telegram, user_id: int, chat_id: int, message_id: in
         OutputBucketName=config.AUDIO_BUCKET,
         OutputKey=f"transcripts/{job_name}.json",
     )
+    return True
