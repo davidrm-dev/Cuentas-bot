@@ -32,6 +32,9 @@ def observe_transaction(profile: Profile, tx: Transaction, local_hour: int | Non
         _ticket_add(stats, tx.category, float(tx.amount))
     usage = stats.setdefault("usage", {})
     usage[tx.source] = usage.get(tx.source, 0) + 1
+    if tx.account:
+        accs = usage.setdefault("accounts", {})
+        accs[tx.account] = accs.get(tx.account, 0) + 1
     if local_hour is not None:
         hours = usage.setdefault("hours", [0] * 24)
         hours[local_hour] += 1
@@ -170,6 +173,14 @@ def context_for_llm(profile: Profile) -> str:
     if profile.budgets:
         lines.append("Presupuestos mensuales: " + ", ".join(
             f"{c}={fmt(v, cur)}" for c, v in profile.budgets.items()))
+    if profile.default_account:
+        lines.append(f"Cuenta principal: {profile.default_account}")
+    if profile.accounts:
+        lines.append("Saldos que lleva: " + ", ".join(
+            f"{k}={fmt(v['saldo'], cur)}" for k, v in profile.accounts.items()))
+    used = profile.stats.get("usage", {}).get("accounts") or {}
+    if used:
+        lines.append("Cuentas que más usa: " + ", ".join(k for k, _ in sorted(used.items(), key=lambda kv: -kv[1])[:3]))
     if profile.reserves:
         lines.append("Gastos fijos apartados cada mes: " + ", ".join(
             f"{name}={fmt(r['monto'], cur)}" for name, r in profile.reserves.items()))

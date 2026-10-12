@@ -12,7 +12,7 @@ from decimal import ROUND_CEILING, Decimal
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
-from . import categories
+from . import accounts, categories
 from .models import Debt, Profile, Subscription, Transaction, money
 
 ZERO = Decimal("0")
@@ -375,6 +375,9 @@ def plan_month(profile: Profile, month_txs: list[Transaction], subs: list[Subscr
     t = totals(month_txs)
     if cash_now is not None:
         available, available_source = cash_now, "saldo que indicó el usuario"
+    elif profile.accounts:
+        available = sum((v["saldo"] for v in profile.accounts.values()), ZERO)
+        available_source = "saldos de tus cuentas"
     else:
         income = t["income"] if t["income"] > 0 else reference_income(profile)
         month_start, month_end_ = month_bounds(today)
@@ -482,6 +485,26 @@ def plan_text(plan: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def accounts_summary(profile: Profile, month_txs: Iterable[Transaction]) -> dict[str, Any]:
+    spent = _spent_by_account(month_txs)
+    return {
+        "moneda": profile.currency,
+        "cuenta_principal": profile.default_account or None,
+        "saldos": {accounts.label(k): float(v["saldo"]) for k, v in profile.accounts.items()},
+        "saldo_total_registrado": float(sum((v["saldo"] for v in profile.accounts.values()), ZERO)),
+        "gastado_este_mes_por_cuenta": {(accounts.label(k) if k != "sin_cuenta" else "Sin cuenta"): float(v)
+                                        for k, v in sorted(spent.items(), key=lambda kv: -kv[1])},
+    }
+
+
+def _spent_by_account(month_txs: Iterable[Transaction]) -> dict[str, Decimal]:
+    spent: dict[str, Decimal] = defaultdict(lambda: ZERO)
+    for tx in month_txs:
+        if tx.kind == "expense":
+            spent[tx.account or "sin_cuenta"] += tx.amount
+    return spent
+
+
 # ---------------------------------------------------------------------------
 # Resúmenes
 # ---------------------------------------------------------------------------
@@ -507,6 +530,7 @@ def summary_payload(profile: Profile, txs: list[Transaction], start: date, end: 
             for x in biggest
         ],
         "cantidad_movimientos": len(txs),
+        "por_cuenta": accounts_summary(profile, txs)["gastado_este_mes_por_cuenta"],
     }
 
 
@@ -625,9 +649,14 @@ def dashboard(profile: Profile, month_txs: list[Transaction], history_txs: list[
         "transactions": [tx.to_public() for tx in sorted(month_txs, key=lambda x: (x.date, x.created_at),
                                                          reverse=True)],
         "insights": profile.insights,
+        "accounts": [{"key": k, "label": accounts.label(k), "balance": float(v["saldo"]),
+                      "updated": v.get("actualizado")} for k, v in profile.accounts.items()],
+        "spent_by_account": [{"label": (accounts.label(k) if k != "sin_cuenta" else "Sin cuenta"), "amount": float(v)}
+                             for k, v in sorted(_spent_by_account(month_txs).items(), key=lambda kv: -kv[1])],
         "reserves": [{**r, "monto": float(r["monto"]), "gastado": float(r["gastado"]),
                       "pendiente": float(r["pendiente"])} for r in reserves_remaining(profile, month_txs)],
         "debts": [d.to_public() for d in sorted(debts, key=lambda d: (d.due_date or "9999", d.date))
                   if not d.closed],
         "category_catalog": {k: categories.label(k) for k in categories.CATEGORIES},
+        "account_catalog": {k: accounts.label(k) for k in accounts.ACCOUNTS},
     }

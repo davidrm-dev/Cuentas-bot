@@ -21,6 +21,7 @@ class FakeRepo:
         self.txs: dict[tuple[int, str], Transaction] = {}
         self.subs: dict[tuple[int, str], Subscription] = {}
         self.debts: dict[tuple[int, str], Debt] = {}
+        self.imports: dict[tuple[int, str], dict[str, Any]] = {}
         self.messages: list[tuple[int, str, str]] = []
         self.alerts: set[tuple[int, str]] = set()
 
@@ -70,6 +71,15 @@ class FakeRepo:
 
     def get_debt(self, user_id: int, debt_id: str):
         return self.debts.get((user_id, debt_id))
+
+    def save_import(self, user_id: int, import_id: str, data: dict[str, Any], ttl_days: int = 7) -> None:
+        self.imports[(user_id, import_id)] = data
+
+    def get_import(self, user_id: int, import_id: str):
+        return self.imports.get((user_id, import_id))
+
+    def delete_import(self, user_id: int, import_id: str) -> None:
+        self.imports.pop((user_id, import_id), None)
 
     def add_message(self, user_id: int, role: str, text: str, ttl_days: int = 7) -> None:
         self.messages.append((user_id, role, text))

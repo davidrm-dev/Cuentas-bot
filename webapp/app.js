@@ -166,6 +166,7 @@
     renderTransactions(d);
     renderSubscriptions(d);
     renderReservesAndDebts(d);
+    renderAccounts(d);
     renderSettings(d);
   }
 
@@ -412,7 +413,7 @@
         const b = el("button", { class: "tx", type: "button" });
         const main = el("div", { class: "main" });
         main.append(el("div", { class: "desc" }, t.description || rest.join(" ")),
-          el("div", { class: "cat" }, `${rest.join(" ")}${t.source === "voice" ? " · 🎙️" : ""}${t.source === "subscription" ? " · 🔁" : ""}`));
+          el("div", { class: "cat" }, `${rest.join(" ")}${t.account && d.account_catalog ? ` · ${d.account_catalog[t.account] || t.account}` : ""}${t.source === "voice" ? " · 🎙️" : ""}${t.source === "image" ? " · 📸" : ""}${t.source === "subscription" ? " · 🔁" : ""}`));
         b.append(el("span", { class: "emoji", "aria-hidden": "true" }, emoji), main,
           el("span", { class: `amt ${t.kind}` }, `${t.kind === "income" ? "+" : "−"}${money(t.amount)}`));
         b.addEventListener("click", () => openTx(t));
@@ -433,6 +434,10 @@
     const options = t.kind === "income" ? INCOME : state.data.category_catalog;
     for (const [k, label] of Object.entries(options)) sel.append(el("option", { value: k }, label));
     sel.value = t.category;
+    const acc = $("#dlg-acc");
+    acc.replaceChildren(el("option", { value: "" }, "Sin cuenta"));
+    for (const [k, label] of Object.entries(state.data.account_catalog || {})) acc.append(el("option", { value: k }, label));
+    acc.value = t.account || "";
     $("#tx-dialog").showModal();
   }
 
@@ -443,8 +448,11 @@
     try {
       if (action === "delete") {
         await api(`/api/transactions/${t.id}`, { method: "DELETE" });
-      } else if (action === "save" && $("#dlg-cat").value !== t.category) {
-        await api(`/api/transactions/${t.id}`, { method: "PATCH", body: JSON.stringify({ category: $("#dlg-cat").value }) });
+      } else if (action === "save") {
+        const body = {};
+        if ($("#dlg-cat").value !== t.category) body.category = $("#dlg-cat").value;
+        if ($("#dlg-acc").value !== (t.account || "")) body.account = $("#dlg-acc").value;
+        if (Object.keys(body).length) await api(`/api/transactions/${t.id}`, { method: "PATCH", body: JSON.stringify(body) });
       }
       haptic("success");
       await load();
@@ -469,6 +477,26 @@
       right.append(el("div", {}, money(s.amount)));
       if (s.cycle !== "monthly") right.append(el("div", { class: "meta" }, `${money(s.monthly_cost)}/mes`));
       li.append(left, right);
+      list.append(li);
+    }
+  }
+
+  function renderAccounts(d) {
+    const list = $("#accounts");
+    list.replaceChildren();
+    const balances = d.accounts || [];
+    const spent = d.spent_by_account || [];
+    $("#accounts-card").hidden = !balances.length && !spent.some((x) => x.label !== "Sin cuenta");
+    for (const a of balances) {
+      const li = el("li");
+      const left = el("div");
+      left.append(el("div", {}, a.label), el("div", { class: "meta" }, a.updated ? `saldo al ${a.updated.slice(8)}/${a.updated.slice(5, 7)}` : "saldo"));
+      li.append(left, el("div", { class: "amt" }, money(a.balance)));
+      list.append(li);
+    }
+    for (const x of spent) {
+      const li = el("li");
+      li.append(el("div", { class: "meta" }, `Gastado con ${x.label}`), el("div", { class: "amt meta" }, money(x.amount)));
       list.append(li);
     }
   }
@@ -603,7 +631,7 @@
         { id: "s3", name: "Gimnasio", amount: 150000, cycle: "monthly", next_charge: "2026-11-01", monthly_cost: 150000, category: "salud" },
       ],
       transactions: [
-        tx("a", "2026-10-15", 31000, "restaurantes", "Almuerzo con el equipo", "expense", "voice"),
+        { ...tx("a", "2026-10-15", 31000, "restaurantes", "Almuerzo con el equipo", "expense", "voice"), account: "nequi" },
         tx("b", "2026-10-14", 160000, "ocio", "Concierto"),
         tx("c", "2026-10-14", 23000, "transporte", "Uber al centro", "expense", "voice"),
         tx("d", "2026-10-12", 95000, "supermercado", "Mercado semanal"),
@@ -617,6 +645,10 @@
         "Prefiere comunicarse con notas de voz.",
       ],
       category_catalog: cats,
+      accounts: [{ key: "nequi", label: "💜 Nequi", balance: 312000, updated: "2026-10-15" },
+                 { key: "efectivo", label: "💵 Efectivo", balance: 45000, updated: "2026-10-14" }],
+      spent_by_account: [{ label: "💜 Nequi", amount: 980000 }, { label: "🟣 Nu", amount: 610000 }, { label: "💵 Efectivo", amount: 348000 }],
+      account_catalog: { nequi: "💜 Nequi", efectivo: "💵 Efectivo", nu: "🟣 Nu", daviplata: "❤️ Daviplata" },
       reserves: [{ nombre: "gasolina", monto: 200000, gastado: 120000, pendiente: 80000, categoria: "transporte" }],
       debts: [
         { id: "d1", direction: "me_deben", person: "Juan", amount: 50000, paid: 20000, balance: 30000, date: "2026-10-02", due_date: "2026-10-17" },

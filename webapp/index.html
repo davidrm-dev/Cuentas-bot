@@ -27,6 +27,10 @@
 
       <section data-panel="resumen" hidden>
         <div class="tiles" id="tiles"></div>
+        <div class="card" id="accounts-card" hidden>
+          <h2>Cuentas</h2>
+          <ul class="rows" id="accounts"></ul>
+        </div>
         <div class="card" id="budgets-card" hidden>
           <h2>Presupuestos</h2>
           <ul class="budgets" id="budgets"></ul>
@@ -108,6 +112,7 @@
         <h2 id="dlg-title"></h2>
         <p class="sub" id="dlg-sub"></p>
         <label>Categoría <select id="dlg-cat"></select></label>
+        <label>Cuenta <select id="dlg-acc"></select></label>
         <div class="actions">
           <button value="delete" class="danger" id="dlg-delete">Eliminar</button>
           <button value="cancel">Cancelar</button>

@@ -47,6 +47,7 @@ def main() -> None:
     call(token, "setMyCommands", commands=[
         {"command": "resumen", "description": "Resumen del mes"},
         {"command": "dashboard", "description": "Abrir el dashboard completo"},
+        {"command": "cuentas", "description": "Saldos y gastos por cuenta"},
         {"command": "prestamos", "description": "Lo que te deben y lo que debes"},
         {"command": "fijos", "description": "Suscripciones y gastos fijos apartados"},
         {"command": "deshacer", "description": "Borrar el último movimiento"},

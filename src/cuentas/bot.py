@@ -8,7 +8,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 
-from . import assistant, categories, config, finance, learning, parsing, usage
+from . import accounts, assistant, categories, config, finance, learning, parsing, usage
 from .finance import Alert, fmt
 from .ledger import Ledger
 from .models import Profile, Transaction
@@ -29,7 +29,8 @@ HELP = (
     "• <i>Ponme un tope de 400 mil en ocio</i>\n\n"
     "• <i>Le presté 50 mil a Juan, me paga el viernes</i> · <i>Le debo 200 mil a mi papá</i>\n"
     "• <i>Aparta 200 mil al mes para gasolina</i>\n\n"
-    "Comandos: /resumen /prestamos /fijos /dashboard /deshacer /consumo /ayuda"
+    "• <i>Gasté 20 mil en almuerzo con Nequi</i> · <i>Tengo 300 mil en Daviplata</i>\n\n"
+    "Comandos: /resumen /cuentas /prestamos /fijos /dashboard /deshacer /consumo /ayuda"
 )
 
 
@@ -47,8 +48,16 @@ def ensure_profile(repo: Repository, user: dict[str, Any], chat_id: int) -> tupl
 
 def tx_keyboard(tx: Transaction) -> list[list[dict[str, Any]]]:
     ref = f"{tx.date}:{tx.id}"
-    return [[{"text": "🏷️ Cambiar categoría", "callback_data": f"c:{ref}"},
+    return [[{"text": "🏷️ Categoría", "callback_data": f"c:{ref}"},
+             {"text": "💳 Cuenta", "callback_data": f"a:{ref}"},
              {"text": "↩️ Deshacer", "callback_data": f"u:{ref}"}]]
+
+
+def account_keyboard(tx: Transaction) -> list[list[dict[str, Any]]]:
+    ref = f"{tx.date}:{tx.id}"
+    buttons = [{"text": accounts.label(k), "callback_data": f"sa:{ref}:{k}"} for k in accounts.ACCOUNTS
+               if k != tx.account]
+    return [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
 
 
 def category_keyboard(tx: Transaction) -> list[list[dict[str, Any]]]:
@@ -79,11 +88,12 @@ def drop_unbacked_amounts(text: str, notes: list[str]) -> str:
 
 
 def handle_conversation(tg: Telegram, repo: Repository, profile: Profile, chat_id: int, text: str,
-                        source: str = "text", reply_to: int | None = None) -> None:
-    """Pasa el mensaje (escrito o transcrito) al asistente y envía su respuesta."""
-    learning.observe_input(profile, "voice" if source == "voice" else "text")
+                        source: str = "text", reply_to: int | None = None,
+                        image: tuple[bytes, str] | None = None) -> None:
+    """Pasa el mensaje (escrito, transcrito o un pantallazo) al asistente y envía su respuesta."""
+    learning.observe_input(profile, {"voice": "voice", "image": "image"}.get(source, "text"))
     ledger = Ledger(repo, profile)
-    if config.FAST_PATH and fast_record(tg, ledger, chat_id, text, source, reply_to):
+    if image is None and config.FAST_PATH and fast_record(tg, ledger, chat_id, text, source, reply_to):
         repo.save_profile(profile)
         return
     if not usage.llm_allowed(profile.stats, ledger.today):
@@ -94,18 +104,50 @@ def handle_conversation(tg: Telegram, repo: Repository, profile: Profile, chat_i
         return
     tg.typing(chat_id)
     history = repo.recent_messages(profile.user_id, config.HISTORY_TURNS * 2)
-    result = assistant.reply(ledger, text, source=source, history=history)
+    tg.typing(chat_id)
+    result = assistant.reply(ledger, text, source=source, history=history, image=image)
     if any(result.tokens.values()):
         usage.add_llm(profile.stats, ledger.today, result.tokens)
     repo.save_profile(profile)
     keyboard = tx_keyboard(result.recorded[-1]) if len(result.recorded) == 1 else None
     for note in result.notes:
-        tg.send(chat_id, note, reply_to=reply_to)
+        undo = [[{"text": "↩️ Deshacer importación", "callback_data": f"ui:{result.import_id}"}]] \
+            if result.import_id and note.startswith("📸") else None
+        tg.send(chat_id, note, keyboard=undo, reply_to=reply_to)
+    if result.import_id:
+        keyboard = None  # el botón de deshacer va en el detalle de la importación
     result.text = drop_unbacked_amounts(result.text, result.notes)
     tg.send(chat_id, result.text, keyboard=keyboard, reply_to=None if result.notes else reply_to)
     send_alerts(tg, chat_id, result.alerts)
-    repo.add_message(profile.user_id, "user", text)
+    repo.add_message(profile.user_id, "user", f"[pantallazo] {text}" if image else text)
     repo.add_message(profile.user_id, "assistant", result.text)
+
+
+def undo_import(tg: Telegram, repo: Repository, profile: Profile, callback: dict[str, Any], import_id: str) -> None:
+    message = callback.get("message") or {}
+    data = repo.get_import(profile.user_id, import_id)
+    if data is None:
+        tg.answer_callback(callback["id"], "Esa importación ya no se puede deshacer")
+        return
+    ledger = Ledger(repo, profile)
+    removed = 0
+    for ref in data.get("refs") or []:
+        tx_date, tx_id = ref.split(":")
+        tx = repo.get_transaction(profile.user_id, tx_date, tx_id)
+        if tx:
+            ledger.delete(tx)
+            removed += 1
+    account = data.get("account")
+    if account:
+        if data.get("had_balance"):
+            ledger.set_balance(account, Decimal(str(data["balance_before"])))
+        else:
+            profile.accounts.pop(account, None)
+            repo.save_profile(profile)
+    repo.delete_import(profile.user_id, import_id)
+    tg.answer_callback(callback["id"], "Importación deshecha")
+    tg.edit(message["chat"]["id"], message["message_id"],
+            f"↩️ Deshice la importación del pantallazo ({removed} movimiento(s) borrados y saldo restaurado).")
 
 
 def fast_record(tg: Telegram, ledger: Ledger, chat_id: int, text: str, source: str,
@@ -118,12 +160,16 @@ def fast_record(tg: Telegram, ledger: Ledger, chat_id: int, text: str, source: s
     merchant = entry.description if len(entry.description.split()) <= 3 else ""
     tx = Transaction(user_id=profile.user_id, kind=entry.kind, amount=entry.amount, category=entry.category,
                      description=entry.description.capitalize(), merchant=merchant, date=ledger.today.isoformat(),
-                     necessity=categories.default_necessity(entry.category), source=source)
+                     necessity=categories.default_necessity(entry.category), source=source,
+                     account=entry.account)
     alerts = ledger.record(tx)
     usage.add_fast(profile.stats, ledger.today)
     verb = "Ingreso" if tx.kind == "income" else "Gasto"
-    tg.send(chat_id, f"✅ {verb}: <b>{fmt(tx.amount, profile.currency)}</b> · {categories.label(tx.category)}\n"
-                     f"<i>{html.escape(tx.description)}</i>", keyboard=tx_keyboard(tx), reply_to=reply_to)
+    via = f" · {accounts.label(tx.account)}" if tx.account else ""
+    balance = profile.accounts.get(tx.account)
+    left = f"\nSaldo en {accounts.ACCOUNTS[tx.account][0]}: {fmt(balance['saldo'], profile.currency)}" if balance else ""
+    tg.send(chat_id, f"✅ {verb}: <b>{fmt(tx.amount, profile.currency)}</b> · {categories.label(tx.category)}{via}\n"
+                     f"<i>{html.escape(tx.description)}</i>{left}", keyboard=tx_keyboard(tx), reply_to=reply_to)
     send_alerts(tg, chat_id, alerts)
     ledger.repo.add_message(profile.user_id, "user", text)
     ledger.repo.add_message(profile.user_id, "assistant", f"Registré {verb.lower()} de {tx.amount} en {tx.category}")
@@ -180,6 +226,22 @@ def handle_command(tg: Telegram, repo: Repository, profile: Profile, chat_id: in
             lines.append("\n⛽ <b>Apartado cada mes</b>")
             lines += [f"• {html.escape(r['nombre'].capitalize())}: {fmt(r['gastado'], cur)} de {fmt(r['monto'], cur)}"
                       f" — quedan {fmt(r['pendiente'], cur)} apartados" for r in reserves]
+        tg.send(chat_id, "\n".join(lines))
+        return True
+    if cmd == "/cuentas":
+        summary = finance.accounts_summary(profile, ledger.month_transactions())
+        cur = profile.currency
+        lines = ["🏦 <b>Tus cuentas</b>"]
+        if summary["saldos"]:
+            lines += [f"• {name}: <b>{fmt(v, cur)}</b>" for name, v in summary["saldos"].items()]
+            lines.append(f"Total: {fmt(summary['saldo_total_registrado'], cur)}")
+        else:
+            lines.append("Aún no me has dicho saldos. Ej: <i>tengo 300 mil en Nequi y 50 mil en efectivo</i>.")
+        if summary["gastado_este_mes_por_cuenta"]:
+            lines.append("\n<b>Gastado este mes por cuenta</b>")
+            lines += [f"• {name}: {fmt(v, cur)}" for name, v in summary["gastado_este_mes_por_cuenta"].items()]
+        if profile.default_account:
+            lines.append(f"\nCuenta principal: {accounts.label(profile.default_account)}")
         tg.send(chat_id, "\n".join(lines))
         return True
     if cmd in ("/prestamos", "/deudas"):
@@ -257,6 +319,9 @@ def handle_callback(tg: Telegram, repo: Repository, callback: dict[str, Any]) ->
     message_id = message.get("message_id")
     profile = repo.get_profile(callback["from"]["id"])
     parts = data.split(":")
+    if profile is not None and len(parts) == 2 and parts[0] == "ui":
+        undo_import(tg, repo, profile, callback, parts[1])
+        return
     if profile is not None and len(parts) == 2 and parts[0] in ("dp", "dz"):
         handle_debt_callback(tg, repo, profile, callback, parts[0], parts[1])
         return
@@ -279,6 +344,17 @@ def handle_callback(tg: Telegram, repo: Repository, callback: dict[str, Any]) ->
         tg.edit(chat_id, message_id,
                 f"¿En qué categoría va <b>{html.escape(tx.description)}</b> ({fmt(tx.amount, cur)})?",
                 keyboard=category_keyboard(tx))
+    elif action == "a":
+        tg.answer_callback(callback["id"])
+        tg.edit(chat_id, message_id,
+                f"¿Con qué cuenta pagaste <b>{html.escape(tx.description)}</b> ({fmt(tx.amount, cur)})?",
+                keyboard=account_keyboard(tx))
+    elif action == "sa" and len(parts) == 4 and accounts.is_valid(parts[3]):
+        ledger.change_account(tx, parts[3])
+        tg.answer_callback(callback["id"], "Cuenta actualizada")
+        tg.edit(chat_id, message_id,
+                f"✅ {html.escape(tx.description)} — {fmt(tx.amount, cur)} · {categories.label(tx.category)} · "
+                f"{accounts.label(tx.account)}", keyboard=tx_keyboard(tx))
     elif action == "s" and len(parts) == 4 and categories.is_valid(parts[3]):
         ledger.recategorize(tx, parts[3])
         tg.answer_callback(callback["id"], "Categoría actualizada; lo tendré en cuenta")

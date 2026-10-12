@@ -5,6 +5,7 @@ PK = USER#<id>
   SK = TX#<YYYY-MM-DD>#<id>        movimientos (gastos e ingresos)
   SK = SUB#<id>                    suscripciones
   SK = DEBT#<id>                   préstamos (me deben / debo)
+  SK = IMPORT#<id>                 movimientos importados de un pantallazo (TTL, para deshacer)
   SK = MSG#<iso>                   historial corto de conversación (TTL)
   SK = ALERT#<clave>               alertas ya enviadas, para no repetirlas (TTL)
 GSI1:
@@ -116,6 +117,17 @@ class Repository:
     def get_debt(self, user_id: int, debt_id: str) -> Debt | None:
         item = self.table.get_item(Key={"PK": f"USER#{user_id}", "SK": f"DEBT#{debt_id}"}).get("Item")
         return Debt.from_item(item) if item else None
+
+    # ---- importaciones de pantallazos (para poder deshacerlas) -------
+    def save_import(self, user_id: int, import_id: str, data: dict[str, Any], ttl_days: int = 7) -> None:
+        self.table.put_item(Item=to_dynamo({"PK": f"USER#{user_id}", "SK": f"IMPORT#{import_id}", **data,
+                                            "ttl": int(time.time() + ttl_days * 86400)}))
+
+    def get_import(self, user_id: int, import_id: str) -> dict[str, Any] | None:
+        return self.table.get_item(Key={"PK": f"USER#{user_id}", "SK": f"IMPORT#{import_id}"}).get("Item")
+
+    def delete_import(self, user_id: int, import_id: str) -> None:
+        self.table.delete_item(Key={"PK": f"USER#{user_id}", "SK": f"IMPORT#{import_id}"})
 
     # ---- historial de conversación -----------------------------------
     def add_message(self, user_id: int, role: str, text: str, ttl_days: int = 7) -> None:

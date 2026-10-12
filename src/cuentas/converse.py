@@ -48,8 +48,12 @@ def clean_text(text: str) -> str:
 
 
 def loop(system_prompt: str, context: str, user_text: str, executor: ToolExecutor,
-         tokens: dict[str, int], max_steps: int) -> str:
-    messages: list[dict[str, Any]] = [{"role": "user", "content": [{"text": context}, {"text": user_text}]}]
+         tokens: dict[str, int], max_steps: int, image: tuple[bytes, str] | None = None) -> str:
+    content: list[dict[str, Any]] = [{"text": context}]
+    if image:
+        content.append({"image": {"format": image[1], "source": {"bytes": image[0]}}})
+    content.append({"text": user_text})
+    messages: list[dict[str, Any]] = [{"role": "user", "content": content}]
     client = _client()
     for step in range(max_steps):
         response = client.converse(

@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from . import learning
 from .finance import Alert, check_alerts, month_bounds, today_for
-from .models import Profile, Subscription, Transaction
+from .models import Profile, Subscription, Transaction, money
 from .repository import Repository
 
 
@@ -26,10 +26,42 @@ class Ledger:
         start, end = month_bounds(ref or self.today)
         return self.repo.list_transactions(self.profile.user_id, start.isoformat(), end.isoformat())
 
+    # ---- saldos por cuenta ------------------------------------------
+    def _apply_balance(self, tx: Transaction, sign: int) -> None:
+        """Ajusta el saldo de la cuenta del movimiento, si el usuario lleva saldo de esa cuenta."""
+        acc = self.profile.accounts.get(tx.account)
+        if acc is None:
+            return
+        delta = tx.amount if tx.kind == "income" else -tx.amount
+        acc["saldo"] = money(acc["saldo"] + sign * delta)
+
+    def set_balance(self, account: str, balance: Decimal) -> None:
+        self.profile.accounts[account] = {"saldo": money(balance), "actualizado": self.today.isoformat()}
+        self.repo.save_profile(self.profile)
+
+    def transfer(self, source: str, target: str, amount: Decimal) -> None:
+        """Mover plata entre cuentas propias no es gasto: solo cambia los saldos."""
+        for account, delta in ((source, -amount), (target, amount)):
+            if account in self.profile.accounts:
+                acc = self.profile.accounts[account]
+                acc["saldo"] = money(acc["saldo"] + delta)
+        self.repo.save_profile(self.profile)
+
+    def change_account(self, tx: Transaction, account: str) -> Transaction:
+        self._apply_balance(tx, -1)
+        tx.account = account
+        self._apply_balance(tx, +1)
+        self.repo.add_transaction(tx)
+        self.repo.save_profile(self.profile)
+        return tx
+
     def record(self, tx: Transaction, alert: bool = True) -> list[Alert]:
         """Guarda el movimiento, aprende de él y devuelve alertas nuevas (no repetidas)."""
         tx.currency = tx.currency or self.profile.currency
+        if not tx.account and self.profile.default_account and tx.source != "subscription":
+            tx.account = self.profile.default_account
         self.repo.add_transaction(tx)
+        self._apply_balance(tx, +1)
         learning.observe_transaction(self.profile, tx, self.local_hour)
         self.repo.save_profile(self.profile)
         if not alert or tx.kind != "expense":
@@ -53,12 +85,17 @@ class Ledger:
         return tx
 
     def change_amount(self, tx: Transaction, amount: Decimal) -> Transaction:
+        self._apply_balance(tx, -1)
         tx.amount = amount
+        self._apply_balance(tx, +1)
         self.repo.add_transaction(tx)
+        self.repo.save_profile(self.profile)
         return tx
 
     def delete(self, tx: Transaction) -> None:
         self.repo.delete_transaction(tx)
+        self._apply_balance(tx, -1)
+        self.repo.save_profile(self.profile)
 
     def find_subscription(self, name: str) -> Subscription | None:
         from .categories import normalize

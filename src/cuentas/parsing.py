@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from decimal import Decimal
 
-from . import categories
+from . import accounts, categories
 from .models import money
 
 _INCOME = re.compile(r"\b(me pagaron|cobre|recibi|ingreso|me depositaron|me transfirieron|gane)\b")
@@ -22,6 +22,7 @@ class QuickEntry:
     amount: Decimal
     category: str
     description: str
+    account: str = ""
 
 
 def parse_amount(raw: str, suffix: str | None = None) -> Decimal:
@@ -37,7 +38,7 @@ def parse_amount(raw: str, suffix: str | None = None) -> Decimal:
 
 
 def quick_parse(text: str, learned: dict[str, str] | None = None) -> QuickEntry | None:
-    norm = categories.normalize(text)
+    account, norm = accounts.detect(text)  # "con nequi" -> cuenta, y se quita del texto
     is_income = bool(_INCOME.search(norm))
     if not is_income and not _EXPENSE.search(norm):
         return None
@@ -54,7 +55,7 @@ def quick_parse(text: str, learned: dict[str, str] | None = None) -> QuickEntry 
         category = "salario" if "salario" in norm or "sueldo" in norm or "nomina" in norm else "otros_ingresos"
     else:
         category = categories.guess(rest, learned)
-    return QuickEntry("income" if is_income else "expense", amount, category, rest[:120])
+    return QuickEntry("income" if is_income else "expense", amount, category, rest[:120], account or "")
 
 
 # Palabras que indican algo más que "un gasto de hoy": fechas, recurrencias, correcciones o preguntas.
@@ -72,7 +73,7 @@ def confident_parse(text: str, learned: dict[str, str] | None = None) -> QuickEn
 
     Ahorra llamadas a la IA en el caso más frecuente ("gasté 12 mil en uber").
     """
-    norm = categories.normalize(text)
+    norm = accounts.detect(text)[1]
     if len(norm.split()) > 10 or _NEEDS_MODEL.search(norm):
         return None
     if len(_AMOUNT.findall(norm)) != 1:

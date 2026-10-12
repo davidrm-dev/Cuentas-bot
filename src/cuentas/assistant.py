@@ -1,6 +1,7 @@
 """Conversación con Claude (Amazon Bedrock) usando herramientas sobre el libro contable."""
 from __future__ import annotations
 
+import base64
 import logging
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -47,6 +48,13 @@ préstamos ("Juan me pagó", "le pagué a mi papá") van con `registrar_abono`, 
 acerque una deuda, ayúdale a planear el pago con lo que tiene disponible.
 - Gastos fijos sin fecha exacta (gasolina, mercado, transporte del mes) van con `fijar_gasto_fijo`: ese dinero se \
 aparta del disponible para que no se lo gaste en otra cosa. Recuérdalo cuando pregunte si puede gastar.
+- Cuentas: si menciona con qué pagó o dónde recibió (Nequi, Daviplata, Nu, Bancolombia, efectivo, PayPal...), \
+ponlo en `cuenta`. "Tengo X en Nequi" → `actualizar_saldo_cuenta`. "Pasé X de Bancolombia a Nequi" o "saqué del \
+cajero" → `transferir_entre_cuentas` (no es gasto). "Mi cuenta principal es Nequi" → `actualizar_perfil`.
+- Pantallazos: si llega una imagen de una app financiera (Nequi, Daviplata, Nu, Bancolombia, PayPal...), \
+identifica la app por su nombre, logo o colores y usa `importar_pantallazo` con el saldo y los movimientos que se \
+lean con claridad (montos positivos, fecha con el año actual si no aparece). Un comprobante de un solo pago es un \
+movimiento. Si la imagen no es financiera o no se lee, dilo y no registres nada.
 - Para consultas de gastos usa `consultar_gastos` con fechas exactas. Nunca inventes cifras: todo número sale \
 de una herramienta o del contexto.
 - Si el usuario te da datos de su situación (sueldo, día de cobro, moneda, meta de ahorro), guárdalos con \
@@ -70,6 +78,7 @@ class AssistantResult:
     recorded: list[Transaction] = field(default_factory=list)
     tokens: dict[str, int] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    import_id: str | None = None
 
 
 @lru_cache(maxsize=1)
@@ -106,20 +115,21 @@ def _context_block(ledger: Ledger, history: list[dict[str, str]]) -> str:
 
 
 def reply(ledger: Ledger, user_text: str, source: str = "text",
-          history: list[dict[str, str]] | None = None) -> AssistantResult:
+          history: list[dict[str, str]] | None = None,
+          image: tuple[bytes, str] | None = None) -> AssistantResult:
+    """`image` = (bytes, formato "jpeg"|"png"|"webp") para pantallazos."""
     executor = ToolExecutor(ledger, source=source)
-    messages: list[dict[str, Any]] = [{
-        "role": "user",
-        "content": [
-            {"type": "text", "text": _context_block(ledger, history or [])},
-            {"type": "text", "text": user_text},
-        ],
-    }]
+    content: list[dict[str, Any]] = [{"type": "text", "text": _context_block(ledger, history or [])}]
+    if image:
+        content.append({"type": "image", "source": {"type": "base64", "media_type": f"image/{image[1]}",
+                                                    "data": base64.b64encode(image[0]).decode()}})
+    content.append({"type": "text", "text": user_text})
+    messages: list[dict[str, Any]] = [{"role": "user", "content": content}]
     tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
     try:
         if config.LLM_PROVIDER == "nova":
             text = converse.loop(SYSTEM_PROMPT, messages[0]["content"][0]["text"], user_text, executor,
-                                 tokens, MAX_STEPS)
+                                 tokens, MAX_STEPS, image)
         else:
             with BetaFallbackState():
                 text = _loop(messages, executor, tokens)
@@ -127,7 +137,7 @@ def reply(ledger: Ledger, user_text: str, source: str = "text",
         log.exception("Fallo llamando al modelo: %s", exc)
         text = _offline_reply(ledger, executor, user_text)
     return AssistantResult(text=text, alerts=executor.alerts, recorded=executor.recorded, tokens=tokens,
-                           notes=executor.notes)
+                           notes=executor.notes, import_id=executor.import_id)
 
 
 def _add_usage(tokens: dict[str, int], usage: Any) -> None:

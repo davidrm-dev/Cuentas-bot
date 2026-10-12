@@ -79,7 +79,20 @@ def process_update(repo: Repository, tg: Telegram, update: dict[str, Any]) -> No
         return
     profile, is_new = bot.ensure_profile(repo, message["from"], chat_id)
 
-    text = message.get("text") or message.get("caption")
+    image = _image_of(message)
+    if image:
+        if image.get("file_size", 0) > MAX_IMAGE_BYTES:
+            tg.send(chat_id, "Esa imagen es muy pesada 😅. Mándala como foto normal (no como archivo).")
+            return
+        fmt = image.get("format", "jpeg")
+        data = tg.download_file(image["file_id"])
+        prompt = (message.get("caption") or "").strip() or \
+            "Te envío un pantallazo de una app financiera. Léelo e importa el saldo y los movimientos."
+        bot.handle_conversation(tg, repo, profile, chat_id, prompt, source="image",
+                                reply_to=message["message_id"], image=(data, fmt))
+        return
+
+    text = message.get("text")
     if text and text.startswith("/"):
         if bot.handle_command(tg, repo, profile, chat_id, text, is_new):
             return
@@ -100,6 +113,20 @@ def process_update(repo: Repository, tg: Telegram, update: dict[str, Any]) -> No
         bot.handle_command(tg, repo, profile, chat_id, "/start", is_new)
     else:
         tg.send(chat_id, "Puedo leer texto y escuchar audios. Cuéntame un gasto o pregúntame algo 🙂")
+
+
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+IMAGE_FORMATS = {"image/jpeg": "jpeg", "image/jpg": "jpeg", "image/png": "png", "image/webp": "webp"}
+
+
+def _image_of(message: dict[str, Any]) -> dict[str, Any] | None:
+    """La foto en mayor resolución, o una imagen enviada como archivo."""
+    if message.get("photo"):
+        return {**message["photo"][-1], "format": "jpeg"}
+    doc = message.get("document") or {}
+    if doc.get("mime_type") in IMAGE_FORMATS:
+        return {**doc, "format": IMAGE_FORMATS[doc["mime_type"]]}
+    return None
 
 
 def start_transcription(tg: Telegram, user_id: int, chat_id: int, message_id: int, update_id: int,

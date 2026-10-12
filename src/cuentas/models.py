@@ -41,6 +41,7 @@ class Transaction:
     necessity: str = "discrecional"  # "esencial" | "discrecional"
     source: str = "text"  # "text" | "voice" | "subscription" | "webapp"
     currency: str = ""
+    account: str = ""  # clave de accounts.ACCOUNTS ("nequi", "efectivo"...); vacío si no se sabe
     id: str = field(default_factory=new_id)
     created_at: str = field(default_factory=utcnow_iso)
 
@@ -66,6 +67,7 @@ class Transaction:
             necessity=item.get("necessity", "discrecional"),
             source=item.get("source", "text"),
             currency=item.get("currency", ""),
+            account=item.get("account", ""),
             id=item["id"],
             created_at=item.get("created_at", ""),
         )
@@ -166,6 +168,9 @@ class Profile:
     budgets: dict[str, Decimal] = field(default_factory=dict)  # categoria -> tope mensual
     # Gastos fijos sin fecha exacta que hay que apartar cada mes (ej. gasolina): nombre -> {monto, categoria}
     reserves: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Saldos por cuenta: clave -> {"saldo": Decimal, "actualizado": fecha}; y cuenta por defecto
+    accounts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    default_account: str = ""
     # Lo que el bot aprende del usuario (ver learning.py)
     merchant_categories: dict[str, str] = field(default_factory=dict)
     stats: dict[str, Any] = field(default_factory=dict)
@@ -198,6 +203,9 @@ class Profile:
             budgets={k: money(v) for k, v in (item.get("budgets") or {}).items()},
             reserves={k: {"monto": money(v["monto"]), "categoria": v.get("categoria", "otros")}
                       for k, v in (item.get("reserves") or {}).items()},
+            accounts={k: {"saldo": money(v["saldo"]), "actualizado": v.get("actualizado", "")}
+                      for k, v in (item.get("accounts") or {}).items()},
+            default_account=item.get("default_account", ""),
             merchant_categories=dict(item.get("merchant_categories") or {}),
             stats=_plain(item.get("stats") or {}),
             insights=list(item.get("insights") or []),

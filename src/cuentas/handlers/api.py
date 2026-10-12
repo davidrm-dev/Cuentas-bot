@@ -8,7 +8,7 @@ from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from .. import categories, config, finance
+from .. import accounts, categories, config, finance
 from ..finance import month_bounds
 from ..ledger import Ledger
 from ..models import Profile, money
@@ -104,6 +104,10 @@ def _route(repo: Repository, profile: Profile, event: dict[str, Any]) -> dict[st
             ledger.recategorize(tx, body["category"])
         if "amount" in body:
             ledger.change_amount(tx, _positive(body["amount"]))
+        if "account" in body:
+            if body["account"] and not accounts.is_valid(body["account"]):
+                raise HttpError(400, "Cuenta inválida")
+            ledger.change_account(tx, body["account"] or "")
         return _response(200, tx.to_public())
 
     if route == "PUT /api/budgets/{category}":

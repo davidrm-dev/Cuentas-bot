@@ -3,17 +3,18 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import categories, finance
+from . import accounts, categories, finance
 from .finance import Alert
 from .ledger import Ledger
-from .models import CYCLES, Debt, Subscription, Transaction, money
+from .models import CYCLES, Debt, Subscription, Transaction, money, new_id
 
 ALL_CATEGORIES = list(categories.CATEGORIES) + list(categories.INCOME_CATEGORIES)
+ACCOUNT_KEYS = list(accounts.ACCOUNTS)
 _DATE = {"type": "string", "description": "Fecha YYYY-MM-DD"}
 
 TOOLS: list[dict[str, Any]] = [
@@ -39,6 +40,8 @@ TOOLS: list[dict[str, Any]] = [
                             "comercio": {"type": "string", "description": "Comercio o persona, si se menciona"},
                             "fecha": {**_DATE, "description": "Fecha del movimiento si no es hoy (YYYY-MM-DD)"},
                             "necesidad": {"type": "string", "enum": ["esencial", "discrecional"]},
+                            "cuenta": {"type": "string", "enum": ACCOUNT_KEYS,
+                                       "description": "Cuenta o medio de pago si lo mencionó (nequi, efectivo...)"},
                         },
                         "required": ["tipo", "monto", "descripcion", "categoria"],
                     },
@@ -206,6 +209,60 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "actualizar_saldo_cuenta",
+        "description": "Guarda cuánto dinero tiene el usuario en una cuenta ('tengo 300 mil en Nequi'). Desde ahí cada gasto o ingreso con esa cuenta actualiza el saldo.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"cuenta": {"type": "string", "enum": ACCOUNT_KEYS}, "saldo": {"type": "number"}},
+            "required": ["cuenta", "saldo"],
+        },
+    },
+    {
+        "name": "transferir_entre_cuentas",
+        "description": "Mueve dinero entre cuentas propias ('pasé 100 mil de Bancolombia a Nequi', 'saqué 50 mil del cajero'). No es gasto.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"desde": {"type": "string", "enum": ACCOUNT_KEYS},
+                           "hacia": {"type": "string", "enum": ACCOUNT_KEYS}, "monto": {"type": "number"}},
+            "required": ["desde", "hacia", "monto"],
+        },
+    },
+    {
+        "name": "consultar_cuentas",
+        "description": "Saldos por cuenta y cuánto se ha gastado este mes desde cada cuenta o medio de pago.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "importar_pantallazo",
+        "description": (
+            "Importa lo que se ve en un pantallazo de una app financiera (Nequi, Daviplata, Nu, Bancolombia, "
+            "PayPal...): la app, el saldo visible y los movimientos visibles. Solo para imágenes; no inventes datos "
+            "que no se lean claramente. El sistema descarta los movimientos que ya estaban registrados."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "app": {"type": "string", "enum": ACCOUNT_KEYS + ["desconocida"]},
+                "saldo": {"type": "number", "description": "Saldo disponible que muestra la app, si se ve"},
+                "movimientos": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "fecha": {**_DATE, "description": "YYYY-MM-DD; usa el año actual si no aparece"},
+                            "descripcion": {"type": "string"},
+                            "monto": {"type": "number", "description": "Siempre positivo"},
+                            "tipo": {"type": "string", "enum": ["gasto", "ingreso"]},
+                            "categoria": {"type": "string", "enum": ALL_CATEGORIES},
+                        },
+                        "required": ["descripcion", "monto", "tipo"],
+                    },
+                },
+            },
+            "required": ["app"],
+        },
+    },
+    {
         "name": "actualizar_perfil",
         "description": "Guarda datos del contexto económico del usuario: ingreso mensual, día de pago, moneda, meta de ahorro o zona horaria.",
         "input_schema": {
@@ -216,6 +273,8 @@ TOOLS: list[dict[str, Any]] = [
                 "moneda": {"type": "string", "description": "Código ISO 4217, ej. COP, MXN, EUR, USD"},
                 "meta_ahorro_pct": {"type": "number", "minimum": 0, "maximum": 90},
                 "zona_horaria": {"type": "string", "description": "Zona IANA, ej. America/Bogota"},
+                "cuenta_principal": {"type": "string", "enum": ACCOUNT_KEYS,
+                                     "description": "Cuenta que usa por defecto cuando no dice cuál"},
             },
         },
     },
@@ -245,6 +304,7 @@ class ToolExecutor:
     alerts: list[Alert] = field(default_factory=list)
     recorded: list[Transaction] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)  # mensajes armados por código que el bot envía tal cual
+    import_id: str | None = None  # importación de pantallazo hecha en este turno (para el botón deshacer)
 
     def run(self, name: str, args: dict[str, Any]) -> str:
         handler: Callable[[dict[str, Any]], Any] | None = getattr(self, f"_t_{name}", None)
@@ -291,15 +351,19 @@ class ToolExecutor:
             tx_date = self._date(item["fecha"]) if item.get("fecha") else self.ledger.today
             if tx_date > self.ledger.today:
                 tx_date = self.ledger.today
+            account = item.get("cuenta") if accounts.is_valid(item.get("cuenta")) else ""
+            if not account:
+                account = accounts.detect(f"{description} {merchant}")[0] or ""
             tx = Transaction(
                 user_id=profile.user_id, kind=kind, amount=self._amount(item.get("monto")),
                 category=category, description=description, merchant=merchant, date=tx_date.isoformat(),
                 necessity=item.get("necesidad") or categories.default_necessity(category), source=self.source,
+                account=account,
             )
             self.alerts.extend(self.ledger.record(tx))
             self.recorded.append(tx)
             saved.append({"id": tx.id, "tipo": item.get("tipo"), "monto": float(tx.amount),
-                          "categoria": tx.category, "fecha": tx.date})
+                          "categoria": tx.category, "fecha": tx.date, "cuenta": tx.account or None})
         month = finance.totals(self.ledger.month_transactions())
         return {
             "registrados": saved,
@@ -476,6 +540,94 @@ class ToolExecutor:
         return {"gastos_fijos": [{"nombre": r["nombre"], "mensual": float(r["monto"]), "gastado_este_mes": float(r["gastado"]),
                                   "por_gastar": float(r["pendiente"])} for r in pending]}
 
+    def _account(self, key: Any) -> str:
+        if not accounts.is_valid(key):
+            raise ToolInputError(f"Cuenta desconocida: {key!r}")
+        return str(key)
+
+    def _t_actualizar_saldo_cuenta(self, args: dict[str, Any]) -> dict[str, Any]:
+        account = self._account(args.get("cuenta"))
+        self.ledger.set_balance(account, self._amount(args.get("saldo"), allow_zero=True))
+        return {"cuenta": accounts.label(account), "saldo": float(self.ledger.profile.accounts[account]["saldo"]),
+                "nota": "Desde ahora los movimientos con esta cuenta actualizan su saldo"}
+
+    def _t_transferir_entre_cuentas(self, args: dict[str, Any]) -> dict[str, Any]:
+        source, target = self._account(args.get("desde")), self._account(args.get("hacia"))
+        if source == target:
+            raise ToolInputError("Las cuentas de origen y destino son la misma")
+        self.ledger.transfer(source, target, self._amount(args.get("monto")))
+        accs = self.ledger.profile.accounts
+        return {"transferido": float(self._amount(args.get("monto"))),
+                "saldos": {accounts.label(k): float(accs[k]["saldo"]) for k in (source, target) if k in accs}}
+
+    def _t_consultar_cuentas(self, args: dict[str, Any]) -> dict[str, Any]:
+        return finance.accounts_summary(self.ledger.profile, self.ledger.month_transactions())
+
+    def _t_importar_pantallazo(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self.source != "image":
+            raise ToolInputError("Esta herramienta solo se usa con pantallazos")
+        ledger, profile = self.ledger, self.ledger.profile
+        cur = profile.currency
+        account = args.get("app") if accounts.is_valid(args.get("app")) else ""
+        oldest = ledger.today - timedelta(days=35)
+        existing = ledger.repo.list_transactions(profile.user_id, (oldest - timedelta(days=1)).isoformat(),
+                                                 ledger.today.isoformat())
+        new, dupes, old = [], 0, 0
+        for item in args.get("movimientos") or []:
+            amount = self._amount(item.get("monto"))
+            when = self._date(item["fecha"]) if item.get("fecha") else ledger.today
+            when = min(when, ledger.today)
+            if when < oldest:
+                old += 1
+                continue
+            kind = "income" if item.get("tipo") == "ingreso" else "expense"
+            if any(t.amount == amount and t.kind == kind and abs((date.fromisoformat(t.date) - when).days) <= 1
+                   and (not t.account or not account or t.account == account) for t in existing + new):
+                dupes += 1
+                continue
+            description = str(item.get("descripcion") or "").strip()[:200]
+            category = item.get("categoria")
+            if not categories.is_valid(category):
+                category = categories.guess(description, profile.merchant_categories)
+            if kind == "income" and category not in categories.INCOME_CATEGORIES:
+                category = "otros_ingresos"
+            if kind == "expense" and category in categories.INCOME_CATEGORIES:
+                category = "otros"
+            tx = Transaction(user_id=profile.user_id, kind=kind, amount=amount, category=category,
+                             description=description, merchant=description[:40], date=when.isoformat(),
+                             necessity=categories.default_necessity(category), source="image", account=account)
+            self.alerts.extend(ledger.record(tx))
+            self.recorded.append(tx)
+            new.append(tx)
+        balance_before = profile.accounts.get(account, {}).get("saldo") if account else None
+        saldo = args.get("saldo")
+        if account and saldo is not None:
+            ledger.set_balance(account, self._amount(saldo, allow_zero=True))
+        self.import_id = new_id()
+        ledger.repo.save_import(profile.user_id, self.import_id, {
+            "refs": [f"{t.date}:{t.id}" for t in new], "account": account,
+            "balance_before": balance_before, "had_balance": balance_before is not None})
+
+        name = accounts.label(account) if account else "una app que no reconocí"
+        lines = [f"📸 <b>Leí tu pantallazo de {name}</b>"]
+        if account and saldo is not None:
+            lines.append(f"Saldo actualizado: <b>{finance.fmt(profile.accounts[account]['saldo'], cur)}</b>")
+        if new:
+            lines.append(f"Registré {len(new)} movimiento(s) nuevo(s):")
+            lines += [f"• {t.date[8:]}/{t.date[5:7]} {'+' if t.kind == 'income' else '−'}{finance.fmt(t.amount, cur)} "
+                      f"{t.description} · {categories.label(t.category)}" for t in new[:15]]
+        else:
+            lines.append("No había movimientos nuevos para registrar.")
+        if dupes:
+            lines.append(f"Omití {dupes} que ya tenías registrados.")
+        if old:
+            lines.append(f"Omití {old} de hace más de un mes.")
+        self.notes.append("\n".join(lines))
+        return {"app": account or "desconocida", "registrados": len(new), "duplicados_omitidos": dupes,
+                "antiguos_omitidos": old, "saldo_actualizado": bool(account and saldo is not None),
+                "nota": "El usuario ya recibió el detalle. Responde en 1-2 líneas sin repetir cifras; si algo "
+                        "no se veía claro, pídele que lo confirme."}
+
     def _t_actualizar_perfil(self, args: dict[str, Any]) -> dict[str, Any]:
         p = self.ledger.profile
         # Un 0 o un valor vacío significa "no lo dijo": no se toca ese dato.
@@ -502,8 +654,10 @@ class ToolExecutor:
             except (ZoneInfoNotFoundError, ValueError):
                 raise ToolInputError("Zona horaria inválida")
             p.timezone = args["zona_horaria"]
+        if args.get("cuenta_principal"):
+            p.default_account = self._account(args["cuenta_principal"])
         self.ledger.repo.save_profile(p)
-        return {"perfil": {"ingreso_mensual": float(p.monthly_income) if p.monthly_income else None,
+        return {"perfil": {"cuenta_principal": p.default_account or None, "ingreso_mensual": float(p.monthly_income) if p.monthly_income else None,
                            "dia_de_pago": p.payday, "moneda": p.currency,
                            "meta_ahorro_pct": float(p.savings_goal_pct), "zona_horaria": p.timezone}}
 

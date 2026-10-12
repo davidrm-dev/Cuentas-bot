@@ -105,7 +105,7 @@ def test_assistant_tool_loop(monkeypatch, repo, tg, profile):
     monkeypatch.setattr(assistant, "_client", lambda: SimpleNamespace(beta=SimpleNamespace(messages=fake)))
     bot.handle_conversation(tg, repo, profile, 1, "ayer gasté 25 mil en el mercado")
     assert tg.sent[0]["text"].startswith("Anotado")
-    assert tg.sent[0]["keyboard"][0][1]["callback_data"].startswith("u:")
+    assert any(b["callback_data"].startswith("u:") for b in tg.sent[0]["keyboard"][0])
     tool_turn = fake.calls[1]["messages"][2]  # usuario, asistente (tool_use), resultados
     assert tool_turn["content"][0]["type"] == "tool_result"
     assert json.loads(tool_turn["content"][0]["content"])["registrados"][0]["monto"] == 25000.0
