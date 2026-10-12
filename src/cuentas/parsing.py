@@ -82,3 +82,30 @@ def confident_parse(text: str, learned: dict[str, str] | None = None) -> QuickEn
     if entry is None or entry.category in ("otros", "otros_ingresos"):
         return None
     return entry
+
+
+def parse_screen_amount(text: str) -> Decimal | None:
+    """Monto tal como aparece en una app ("-$21.500,00", "$ 7.958", "US$ 5.00", "1,955.87") -> Decimal.
+
+    Reglas: si hay punto y coma, el último que aparece es el separador decimal. Si hay un solo tipo de
+    separador, es decimal solo cuando aparece una vez y le siguen 1 o 2 dígitos al final ("19,55"); en otro
+    caso son miles ("21.500", "1.250.000").
+    """
+    raw = re.sub(r"[^\d.,]", "", text or "")
+    if not raw or not re.search(r"\d", raw):
+        return None
+    raw = raw.strip(".,")
+    if "." in raw and "," in raw:
+        decimal_sep = "." if raw.rfind(".") > raw.rfind(",") else ","
+        thousands = "," if decimal_sep == "." else "."
+        raw = raw.replace(thousands, "").replace(decimal_sep, ".")
+    else:
+        sep = "." if "." in raw else "," if "," in raw else ""
+        if sep and raw.count(sep) == 1 and re.search(rf"\{sep}\d{{1,2}}$", raw):
+            raw = raw.replace(sep, ".")
+        else:
+            raw = raw.replace(sep, "") if sep else raw
+    try:
+        return money(Decimal(raw))
+    except ArithmeticError:
+        return None

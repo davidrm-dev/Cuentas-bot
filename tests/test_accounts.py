@@ -63,11 +63,11 @@ def test_account_tools(repo, profile, now):
     assert profile.default_account == "nequi"
 
 
-SHOT = {"app": "nequi", "saldo": 250000, "movimientos": [
-    {"fecha": "2026-10-14", "descripcion": "Rappi", "monto": 35000, "tipo": "gasto"},
-    {"fecha": "2026-10-15", "descripcion": "Uber", "monto": 12000, "tipo": "gasto"},
-    {"fecha": "2026-08-01", "descripcion": "Viejo", "monto": 9000, "tipo": "gasto"},
-    {"fecha": "2026-10-13", "descripcion": "Pago de Juan", "monto": 50000, "tipo": "ingreso"},
+SHOT = {"app": "nequi", "saldo_texto": "$ 250.000,00", "movimientos": [
+    {"fecha": "2026-10-14", "descripcion": "Rappi", "monto_texto": "-$35.000,00", "tipo": "gasto"},
+    {"fecha": "2026-10-15", "descripcion": "Uber", "monto_texto": "-$ 12.000", "tipo": "gasto"},
+    {"fecha": "2026-08-01", "descripcion": "Viejo", "monto_texto": "$9.000", "tipo": "gasto"},
+    {"fecha": "2026-10-13", "descripcion": "Pago de Juan", "monto_texto": "+$ 50.000,00", "tipo": "ingreso"},
 ]}
 
 
@@ -129,3 +129,42 @@ def test_nova_receives_image(monkeypatch, repo, profile, now):
     monkeypatch.setattr(converse, "_client", lambda: Fake())
     assistant.reply(Ledger(repo, profile, now), "lee esto", source="image", image=(b"img", "png"))
     assert seen["messages"][0]["content"][1] == {"image": {"format": "png", "source": {"bytes": b"img"}}}
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("-$21.500,00", "21500.00"), ("$ 7.958", "7958.00"), ("19.558,74", "19558.74"), ("US$ 5.00", "5.00"),
+    ("1,955.87", "1955.87"), ("$1.250.000,00", "1250000.00"), ("0,90", "0.90"), ("$ 1.234", "1234.00"),
+])
+def test_parse_screen_amount(text, expected):
+    from cuentas.parsing import parse_screen_amount
+
+    assert parse_screen_amount(text) == Decimal(expected)
+
+
+def test_import_flags_outliers_and_reads_text_amounts(repo, profile, now):
+    ex = ToolExecutor(Ledger(repo, profile, now), source="image")
+    out = json.loads(ex.run("importar_pantallazo", {"app": "nequi", "movimientos": [
+        {"fecha": "2026-10-14", "descripcion": "Royal Films", "monto_texto": "-$21.500,00", "tipo": "gasto"},
+        {"fecha": "2026-10-14", "descripcion": "Uber", "monto_texto": "-$7.958", "tipo": "gasto"},
+        {"fecha": "2026-10-13", "descripcion": "Tienda", "monto_texto": "-$12.300", "tipo": "gasto"},
+        {"fecha": "2026-10-13", "descripcion": "Moto", "monto_texto": "-$102.000.000", "tipo": "gasto"},
+        {"fecha": "2026-10-13", "descripcion": "Ilegible", "monto_texto": "$ --", "tipo": "gasto"},
+    ]}))
+    amounts = sorted(t.amount for t in ex.recorded)
+    assert amounts == [Decimal("7958"), Decimal("12300"), Decimal("21500"), Decimal("102000000")]
+    assert "⚠️ Revisa estos montos" in ex.notes[0] and "Moto" in ex.notes[0]
+    assert "No pude leer el monto de 1" in ex.notes[0] and out["registrados"] == 4
+
+
+def test_import_links_movements_told_by_voice_later(repo, profile, now):
+    ledger = Ledger(repo, profile, now)
+    told = tx("21500", day="2026-10-12", desc="algo")  # lo contó el 12, pero fue el 4
+    told.source = "voice"
+    ledger.record(told)
+    ex = ToolExecutor(ledger, source="image")
+    out = json.loads(ex.run("importar_pantallazo", {"app": "nequi", "movimientos": [
+        {"fecha": "2026-10-04", "descripcion": "Pagaste en ROYAL FILMS", "monto_texto": "-$21.500,00", "tipo": "gasto"}]}))
+    txs = repo.list_transactions(1, "2026-10-01", "2026-10-31")
+    assert out["registrados"] == 0 and len(txs) == 1
+    assert (txs[0].date, txs[0].account, txs[0].description) == ("2026-10-04", "nequi", "algo")
+    assert "Ajusté 1 que me habías contado antes" in ex.notes[0]

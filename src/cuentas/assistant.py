@@ -53,7 +53,9 @@ ponlo en `cuenta`. "Tengo X en Nequi" → `actualizar_saldo_cuenta`. "Pasé X de
 cajero" → `transferir_entre_cuentas` (no es gasto). "Mi cuenta principal es Nequi" → `actualizar_perfil`.
 - Pantallazos: si llega una imagen de una app financiera (Nequi, Daviplata, Nu, Bancolombia, PayPal...), \
 identifica la app por su nombre, logo o colores y usa `importar_pantallazo` con el saldo y los movimientos que se \
-lean con claridad (montos positivos, fecha con el año actual si no aparece). Un comprobante de un solo pago es un \
+lean con claridad (fecha con el año actual si no aparece). Copia cada monto en `monto_texto` EXACTAMENTE como \
+se ve, con sus puntos y comas: en Colombia "$21.500,00" son veintiún mil quinientos pesos (el punto separa miles \
+y la coma los centavos); no lo conviertas tú. Un comprobante de un solo pago es un \
 movimiento. Si la imagen no es financiera o no se lee, dilo y no registres nada.
 - Para consultas de gastos usa `consultar_gastos` con fechas exactas. Nunca inventes cifras: todo número sale \
 de una herramienta o del contexto.

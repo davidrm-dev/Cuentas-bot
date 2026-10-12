@@ -12,6 +12,7 @@ from . import accounts, categories, finance
 from .finance import Alert
 from .ledger import Ledger
 from .models import CYCLES, Debt, Subscription, Transaction, money, new_id
+from .parsing import parse_screen_amount
 
 ALL_CATEGORIES = list(categories.CATEGORIES) + list(categories.INCOME_CATEGORIES)
 ACCOUNT_KEYS = list(accounts.ACCOUNTS)
@@ -243,7 +244,8 @@ TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "app": {"type": "string", "enum": ACCOUNT_KEYS + ["desconocida"]},
-                "saldo": {"type": "number", "description": "Saldo disponible que muestra la app, si se ve"},
+                "saldo_texto": {"type": "string",
+                                "description": "Saldo copiado EXACTAMENTE como se ve, con sus puntos y comas (ej. '$ 187.450,00')"},
                 "movimientos": {
                     "type": "array",
                     "items": {
@@ -251,11 +253,13 @@ TOOLS: list[dict[str, Any]] = [
                         "properties": {
                             "fecha": {**_DATE, "description": "YYYY-MM-DD; usa el año actual si no aparece"},
                             "descripcion": {"type": "string"},
-                            "monto": {"type": "number", "description": "Siempre positivo"},
+                            "monto_texto": {"type": "string", "description": (
+                                "Monto copiado EXACTAMENTE como aparece en la pantalla, con puntos, comas y "
+                                "decimales, sin convertirlo (ej. '-$21.500,00', '$ 7.958'). El sistema lo interpreta")},
                             "tipo": {"type": "string", "enum": ["gasto", "ingreso"]},
                             "categoria": {"type": "string", "enum": ALL_CATEGORIES},
                         },
-                        "required": ["descripcion", "monto", "tipo"],
+                        "required": ["descripcion", "monto_texto", "tipo"],
                     },
                 },
             },
@@ -572,9 +576,21 @@ class ToolExecutor:
         oldest = ledger.today - timedelta(days=35)
         existing = ledger.repo.list_transactions(profile.user_id, (oldest - timedelta(days=1)).isoformat(),
                                                  ledger.today.isoformat())
-        new, dupes, old = [], 0, 0
+        new, dupes, old, unreadable = [], 0, 0, 0
+        linked: set[str] = set()
+        items = []
         for item in args.get("movimientos") or []:
-            amount = self._amount(item.get("monto"))
+            # El modelo copia el texto de la pantalla; la conversión la hace el código (formato colombiano).
+            amount = parse_screen_amount(str(item.get("monto_texto", ""))) if item.get("monto_texto") else None
+            if amount is None and item.get("monto") is not None:
+                amount = self._amount(item["monto"])
+            if not amount:
+                unreadable += 1
+                continue
+            items.append((item, amount))
+        typical = sorted(a for _, a in items)[len(items) // 2] if items else Decimal(0)
+        suspicious: list[Transaction] = []
+        for item, amount in items:
             when = self._date(item["fecha"]) if item.get("fecha") else ledger.today
             when = min(when, ledger.today)
             if when < oldest:
@@ -584,6 +600,18 @@ class ToolExecutor:
             if any(t.amount == amount and t.kind == kind and abs((date.fromisoformat(t.date) - when).days) <= 1
                    and (not t.account or not account or t.account == account) for t in existing + new):
                 dupes += 1
+                continue
+            # Lo que el usuario contó por voz/texto días después ("ayer pagué...") es el mismo movimiento:
+            # se enlaza con su fecha y cuenta reales en vez de duplicarlo.
+            manual = next((t for t in existing if t.source != "image" and t.id not in linked and t.amount == amount
+                           and t.kind == kind and 0 <= (date.fromisoformat(t.date) - when).days <= 10
+                           and (not t.account or not account or t.account == account)), None)
+            if manual is not None:
+                ledger.repo.delete_transaction(manual)
+                manual.date, manual.account = when.isoformat(), manual.account or account
+                manual.merchant = manual.merchant or str(item.get("descripcion") or "")[:40]
+                ledger.repo.add_transaction(manual)
+                linked.add(manual.id)
                 continue
             description = str(item.get("descripcion") or "").strip()[:200]
             category = item.get("categoria")
@@ -599,10 +627,14 @@ class ToolExecutor:
             self.alerts.extend(ledger.record(tx))
             self.recorded.append(tx)
             new.append(tx)
+            if amount >= 1_000_000 and typical and amount >= typical * 20:
+                suspicious.append(tx)
         balance_before = profile.accounts.get(account, {}).get("saldo") if account else None
-        saldo = args.get("saldo")
+        saldo = parse_screen_amount(str(args["saldo_texto"])) if args.get("saldo_texto") else None
+        if saldo is None and args.get("saldo") is not None:
+            saldo = self._amount(args["saldo"], allow_zero=True)
         if account and saldo is not None:
-            ledger.set_balance(account, self._amount(saldo, allow_zero=True))
+            ledger.set_balance(account, saldo)
         self.import_id = new_id()
         ledger.repo.save_import(profile.user_id, self.import_id, {
             "refs": [f"{t.date}:{t.id}" for t in new], "account": account,
@@ -620,10 +652,18 @@ class ToolExecutor:
             lines.append("No había movimientos nuevos para registrar.")
         if dupes:
             lines.append(f"Omití {dupes} que ya tenías registrados.")
+        if linked:
+            lines.append(f"Ajusté {len(linked)} que me habías contado antes a su fecha y cuenta reales.")
         if old:
             lines.append(f"Omití {old} de hace más de un mes.")
+        if unreadable:
+            lines.append(f"No pude leer el monto de {unreadable}.")
+        if suspicious:
+            lines.append("⚠️ Revisa estos montos, parecen muy altos: " + ", ".join(
+                f"{t.description} {finance.fmt(t.amount, cur)}" for t in suspicious)
+                + ". Si están mal, toca «Deshacer importación».")
         self.notes.append("\n".join(lines))
-        return {"app": account or "desconocida", "registrados": len(new), "duplicados_omitidos": dupes,
+        return {"app": account or "desconocida", "registrados": len(new), "duplicados_omitidos": dupes + len(linked),
                 "antiguos_omitidos": old, "saldo_actualizado": bool(account and saldo is not None),
                 "nota": "El usuario ya recibió el detalle. Responde en 1-2 líneas sin repetir cifras; si algo "
                         "no se veía claro, pídele que lo confirme."}
