@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
@@ -297,6 +298,26 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 
+# Candados contra cambios que el usuario no pidió (el modelo a veces "completa" datos por su cuenta).
+_DONE_VERBS = re.compile(r"\b(gaste|gastamos|pague|pagamos|compre|me cobraron|cobre|recibi|me pagaron|me llego|"
+                         r"me consignaron|me transfirieron|gane|vendi|registra|anota|apunta|agrega|pon)\b")
+_RECURRING = re.compile(r"\b(cada|mensual|mensualmente|semanal|anual|al mes|por mes|suscripcion|suscrito|plan|"
+                        r"membresia|cuota|arriendo|netflix|spotify|disney|youtube|icloud|gimnasio|gym)\b")
+
+
+def _amounts_in(text: str) -> set[Decimal]:
+    from .parsing import _AMOUNT, parse_amount
+
+    norm = categories.normalize(text)
+    found = set()
+    for raw, suffix in _AMOUNT.findall(norm):
+        try:
+            found.add(parse_amount(raw, suffix or None))
+        except (InvalidOperation, ValueError):
+            pass
+    return found
+
+
 class ToolInputError(ValueError):
     pass
 
@@ -309,6 +330,7 @@ class ToolExecutor:
     recorded: list[Transaction] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)  # mensajes armados por código que el bot envía tal cual
     import_id: str | None = None  # importación de pantallazo hecha en este turno (para el botón deshacer)
+    user_text: str = ""  # mensaje del usuario en este turno: las herramientas que cambian datos lo verifican
 
     def run(self, name: str, args: dict[str, Any]) -> str:
         handler: Callable[[dict[str, Any]], Any] | None = getattr(self, f"_t_{name}", None)
@@ -339,6 +361,9 @@ class ToolExecutor:
         items = args.get("movimientos") or []
         if not items:
             raise ToolInputError("No hay movimientos para registrar")
+        norm = categories.normalize(self.user_text)
+        if self.source == "text" and "?" in self.user_text and not _DONE_VERBS.search(norm):
+            raise ToolInputError("El usuario hizo una pregunta, no contó un gasto hecho: no registres nada")
         profile = self.ledger.profile
         saved = []
         for item in items:
@@ -393,6 +418,8 @@ class ToolExecutor:
         raise ToolInputError(f"Acción desconocida: {action}")
 
     def _t_registrar_suscripcion(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self.user_text and not _RECURRING.search(categories.normalize(self.user_text)):
+            raise ToolInputError("El usuario no mencionó un pago recurrente: no crees suscripciones")
         cycle = args.get("ciclo")
         if cycle not in CYCLES:
             raise ToolInputError(f"Ciclo inválido: {cycle}")
@@ -551,6 +578,8 @@ class ToolExecutor:
 
     def _t_actualizar_saldo_cuenta(self, args: dict[str, Any]) -> dict[str, Any]:
         account = self._account(args.get("cuenta"))
+        if self.source != "image" and self._amount(args.get("saldo"), allow_zero=True) not in _amounts_in(self.user_text):
+            raise ToolInputError("El usuario no dijo ese saldo en su mensaje: no cambies saldos por tu cuenta")
         self.ledger.set_balance(account, self._amount(args.get("saldo"), allow_zero=True))
         return {"cuenta": accounts.label(account), "saldo": float(self.ledger.profile.accounts[account]["saldo"]),
                 "nota": "Desde ahora los movimientos con esta cuenta actualizan su saldo"}

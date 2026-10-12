@@ -50,7 +50,7 @@ def test_fast_path_with_account(monkeypatch, repo, tg, profile):
 
 
 def test_account_tools(repo, profile, now):
-    ex = ToolExecutor(Ledger(repo, profile, now))
+    ex = ToolExecutor(Ledger(repo, profile, now), user_text="tengo 500 mil en la Nu")
     ex.run("actualizar_saldo_cuenta", {"cuenta": "nu", "saldo": 500000})
     ex.run("registrar_movimientos", {"movimientos": [
         {"tipo": "gasto", "monto": 40000, "descripcion": "Cine", "categoria": "ocio", "cuenta": "nu"}]})
@@ -168,3 +168,28 @@ def test_import_links_movements_told_by_voice_later(repo, profile, now):
     assert out["registrados"] == 0 and len(txs) == 1
     assert (txs[0].date, txs[0].account, txs[0].description) == ("2026-10-04", "nequi", "algo")
     assert "Ajusté 1 que me habías contado antes" in ex.notes[0]
+
+
+def test_guards_block_unrequested_changes(repo, profile, now):
+    ledger = Ledger(repo, profile, now)
+    ex = ToolExecutor(ledger, user_text="Recibí 20000 de un arreglo de un computador en efectivo")
+    with pytest.raises(ToolInputError):  # Nova inventó el saldo de Nequi
+        ex.run("actualizar_saldo_cuenta", {"cuenta": "nequi", "saldo": 70000})
+    ex.run("registrar_movimientos", {"movimientos": [
+        {"tipo": "ingreso", "monto": 20000, "descripcion": "arreglo", "categoria": "otros_ingresos", "cuenta": "efectivo"}]})
+    assert "nequi" not in profile.accounts and len(ex.recorded) == 1
+
+    plan = ToolExecutor(ledger, user_text="¿Cuánto les pido a mis papás si gasto como 30 mil al día?")
+    with pytest.raises(ToolInputError):
+        plan.run("registrar_movimientos", {"movimientos": [
+            {"tipo": "gasto", "monto": 30000, "descripcion": "Gasto diario habitual", "categoria": "otros"}]})
+    with pytest.raises(ToolInputError):
+        plan.run("registrar_suscripcion", {"nombre": "Gasto diario", "monto": 30000, "ciclo": "monthly",
+                                           "proximo_cobro": "2026-10-16"})
+
+    ok = ToolExecutor(ledger, user_text="pago Spotify 17 mil cada mes, el 20")
+    ok.run("registrar_suscripcion", {"nombre": "Spotify", "monto": 17000, "ciclo": "monthly",
+                                     "proximo_cobro": "2026-10-20"})
+    ToolExecutor(ledger, user_text="tengo 23.927 en nequi").run("actualizar_saldo_cuenta",
+                                                                 {"cuenta": "nequi", "saldo": 23927})
+    assert profile.accounts["nequi"]["saldo"] == Decimal("23927")

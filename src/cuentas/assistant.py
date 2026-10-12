@@ -57,6 +57,9 @@ lean con claridad (fecha con el año actual si no aparece). Copia cada monto en 
 se ve, con sus puntos y comas: en Colombia "$21.500,00" son veintiún mil quinientos pesos (el punto separa miles \
 y la coma los centavos); no lo conviertas tú. Un comprobante de un solo pago es un \
 movimiento. Si la imagen no es financiera o no se lee, dilo y no registres nada.
+- Nunca digas que registraste, cambiaste o borraste algo si no usaste la herramienta en este mismo turno; la \
+conversación reciente es solo contexto. Si el usuario repite un movimiento, pregúntale si es uno nuevo.
+- No cambies saldos ni crees suscripciones que el usuario no pidió explícitamente.
 - Para consultas de gastos usa `consultar_gastos` con fechas exactas. Nunca inventes cifras: todo número sale \
 de una herramienta o del contexto.
 - Si el usuario te da datos de su situación (sueldo, día de cobro, moneda, meta de ahorro), guárdalos con \
@@ -120,7 +123,7 @@ def reply(ledger: Ledger, user_text: str, source: str = "text",
           history: list[dict[str, str]] | None = None,
           image: tuple[bytes, str] | None = None) -> AssistantResult:
     """`image` = (bytes, formato "jpeg"|"png"|"webp") para pantallazos."""
-    executor = ToolExecutor(ledger, source=source)
+    executor = ToolExecutor(ledger, source=source, user_text=user_text)
     content: list[dict[str, Any]] = [{"type": "text", "text": _context_block(ledger, history or [])}]
     if image:
         content.append({"type": "image", "source": {"type": "base64", "media_type": f"image/{image[1]}",
