@@ -11,6 +11,15 @@ Parameters:
     Type: String
     Default: /cuentas-bot/webhook-secret
     Description: Nombre del parámetro SSM (SecureString) con el secreto del webhook
+  LlmProvider:
+    Type: String
+    Default: bedrock
+    AllowedValues: [bedrock, anthropic]
+    Description: bedrock = Claude en Amazon Bedrock; anthropic = API de Anthropic (API key en AnthropicKeyParam).
+  AnthropicKeyParam:
+    Type: String
+    Default: /cuentas-bot/anthropic-api-key
+    Description: Parámetro SSM (SecureString) con la API key de Anthropic, si LlmProvider=anthropic.
   ModelId:
     Type: String
     Default: anthropic.claude-haiku-5-5
@@ -219,6 +228,8 @@ Resources:
           AUDIO_BUCKET: !Ref AudioBucket
           WEBAPP_URL: !Sub https://${WebDistribution.DomainName}/
           MODEL_ID: !Ref ModelId
+          LLM_PROVIDER: !Ref LlmProvider
+          ANTHROPIC_KEY_PARAM: !Ref AnthropicKeyParam
           FALLBACK_MODEL_ID: !Ref FallbackModelId
           BEDROCK_REGION: !Ref BedrockRegion
           LLM_EFFORT: !Ref LlmEffort
@@ -230,7 +241,9 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: ssm:GetParameter
-              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TelegramTokenParam}
+              Resource:
+                - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TelegramTokenParam}
+                - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AnthropicKeyParam}
             - Effect: Allow
               Action: kms:Decrypt
               Resource: "*"
@@ -264,6 +277,8 @@ Resources:
           AUDIO_BUCKET: !Ref AudioBucket
           WEBAPP_URL: !Sub https://${WebDistribution.DomainName}/
           MODEL_ID: !Ref ModelId
+          LLM_PROVIDER: !Ref LlmProvider
+          ANTHROPIC_KEY_PARAM: !Ref AnthropicKeyParam
           FALLBACK_MODEL_ID: !Ref FallbackModelId
           BEDROCK_REGION: !Ref BedrockRegion
           LLM_EFFORT: !Ref LlmEffort
@@ -275,7 +290,9 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: ssm:GetParameter
-              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TelegramTokenParam}
+              Resource:
+                - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TelegramTokenParam}
+                - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AnthropicKeyParam}
             - Effect: Allow
               Action: kms:Decrypt
               Resource: "*"
@@ -312,6 +329,8 @@ Resources:
           AUDIO_BUCKET: !Ref AudioBucket
           WEBAPP_URL: !Sub https://${WebDistribution.DomainName}/
           MODEL_ID: !Ref ModelId
+          LLM_PROVIDER: !Ref LlmProvider
+          ANTHROPIC_KEY_PARAM: !Ref AnthropicKeyParam
           FALLBACK_MODEL_ID: !Ref FallbackModelId
           BEDROCK_REGION: !Ref BedrockRegion
           LLM_EFFORT: !Ref LlmEffort

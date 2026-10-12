@@ -81,7 +81,7 @@ Cada usuario puede cambiar su moneda, zona horaria, ingreso, día de pago y meta
 
 ### Modelo
 
-Por defecto usa **Claude Haiku 5.5** (`anthropic.claude-haiku-5-5`) con esfuerzo `low`, mediante el cliente `AnthropicBedrockMantle` del SDK oficial de Anthropic. Para registrar y clasificar gastos sobra, y cuesta una fracción de Sonnet u Opus. Si algún día quieres respuestas más elaboradas, cambia `ModelId` a `anthropic.claude-sonnet-5-5` sin tocar código. Hay un respaldo ante rechazos (`FallbackModelId`) que solo actúa si el modelo principal declina una petición. El rol de las Lambdas tiene `bedrock-mantle:CreateInference`.
+Por defecto usa **Claude Haiku 5.5** (`anthropic.claude-haiku-5-5`) con esfuerzo `low`, mediante el cliente `AnthropicBedrockMantle` del SDK oficial de Anthropic. Para registrar y clasificar gastos sobra, y cuesta una fracción de Sonnet u Opus. Si algún día quieres respuestas más elaboradas, cambia `ModelId` a `anthropic.claude-sonnet-5-5` sin tocar código. Si tu cuenta de AWS aún no tiene acceso a Claude en Bedrock, puedes usar la **API de Anthropic** directamente con el mismo modelo y precio: guarda la API key en SSM (`aws ssm put-parameter --name /cuentas-bot/anthropic-api-key --type SecureString --value "sk-ant-..."`) y despliega con `LlmProvider=anthropic`. Hay un respaldo ante rechazos (`FallbackModelId`) que solo actúa si el modelo principal declina una petición. El rol de las Lambdas tiene `bedrock-mantle:CreateInference`.
 
 ## Costos 💸
 

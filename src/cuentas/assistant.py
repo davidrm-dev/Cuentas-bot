@@ -8,7 +8,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import anthropic
-from anthropic import AnthropicBedrockMantle, BetaFallbackState, BetaRefusalFallbackMiddleware
+from anthropic import Anthropic, AnthropicBedrockMantle, BetaFallbackState, BetaRefusalFallbackMiddleware
 
 from . import categories, config, learning, parsing
 from .finance import Alert, fmt
@@ -60,15 +60,15 @@ class AssistantResult:
 
 
 @lru_cache(maxsize=1)
-def _client() -> AnthropicBedrockMantle:
-    # El rol de ejecución de Lambda provee las credenciales (cadena estándar de AWS).
-    return AnthropicBedrockMantle(
-        aws_region=config.BEDROCK_REGION,
-        timeout=60,
-        max_retries=2,
-        # Si el modelo principal rechaza por política, el SDK reintenta con el de respaldo (raro en este uso).
-        middleware=[BetaRefusalFallbackMiddleware([{"model": config.FALLBACK_MODEL_ID}])],
-    )
+def _client() -> Anthropic | AnthropicBedrockMantle:
+    # Si el modelo principal rechaza por política, el SDK reintenta con el de respaldo (raro en este uso).
+    middleware = [BetaRefusalFallbackMiddleware([{"model": config.model_id(config.FALLBACK_MODEL_ID)}])]
+    if config.LLM_PROVIDER == "anthropic":
+        return Anthropic(api_key=config.secret(config.ANTHROPIC_KEY_PARAM), timeout=60, max_retries=2,
+                         middleware=middleware)
+    # En Bedrock, el rol de ejecución de Lambda provee las credenciales (cadena estándar de AWS).
+    return AnthropicBedrockMantle(aws_region=config.BEDROCK_REGION, timeout=60, max_retries=2,
+                                  middleware=middleware)
 
 
 def _context_block(ledger: Ledger, history: list[dict[str, str]]) -> str:
@@ -118,7 +118,7 @@ def _loop(messages: list[dict[str, Any]], executor: ToolExecutor, tokens: dict[s
     client = _client()
     for _ in range(MAX_STEPS):
         response = client.beta.messages.create(
-            model=config.MODEL_ID,
+            model=config.model_id(config.MODEL_ID),
             max_tokens=config.LLM_MAX_TOKENS,
             system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
             tools=TOOLS,

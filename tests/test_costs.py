@@ -85,3 +85,24 @@ def test_allowlist_blocks_strangers(monkeypatch, repo, tg):
     assert repo.profiles == {}
     assert tg.sent[0]["text"].startswith("Este bot es privado")
     assert processor.is_allowed(42)
+
+
+def test_model_id_per_provider(monkeypatch):
+    monkeypatch.setattr(config, "LLM_PROVIDER", "anthropic")
+    assert config.model_id("anthropic.claude-haiku-5-5") == "claude-haiku-5-5"
+    monkeypatch.setattr(config, "LLM_PROVIDER", "bedrock")
+    assert config.model_id("claude-haiku-5-5") == "anthropic.claude-haiku-5-5"
+    assert config.model_id("anthropic.claude-haiku-5-5") == "anthropic.claude-haiku-5-5"
+
+
+def test_anthropic_client_reads_key_from_ssm(monkeypatch):
+    import anthropic as sdk
+
+    monkeypatch.setattr(config, "LLM_PROVIDER", "anthropic")
+    monkeypatch.setattr(config, "secret", lambda name: "sk-ant-test")
+    assistant._client.cache_clear()
+    try:
+        client = assistant._client()
+        assert isinstance(client, sdk.Anthropic) and client.api_key == "sk-ant-test"
+    finally:
+        assistant._client.cache_clear()

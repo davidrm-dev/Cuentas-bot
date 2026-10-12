@@ -12,6 +12,9 @@ WEBHOOK_SECRET_PARAM = os.environ.get("WEBHOOK_SECRET_PARAM", "/cuentas-bot/webh
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "")
 
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+# "bedrock" (Claude en Amazon Bedrock, se paga en la factura de AWS) o "anthropic" (API de Anthropic con API key).
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "bedrock").lower()
+ANTHROPIC_KEY_PARAM = os.environ.get("ANTHROPIC_KEY_PARAM", "/cuentas-bot/anthropic-api-key")
 BEDROCK_REGION = os.environ.get("BEDROCK_REGION", AWS_REGION)
 # Haiku 5.5 por costo: ~40 veces más barato que Opus y suficiente para registrar y clasificar gastos.
 MODEL_ID = os.environ.get("MODEL_ID", "anthropic.claude-haiku-5-5")
@@ -53,6 +56,13 @@ def secret(param_name: str) -> str:
 
 def bot_token() -> str:
     return secret(BOT_TOKEN_PARAM)
+
+
+def model_id(model: str) -> str:
+    """Bedrock usa el prefijo "anthropic."; la API de Anthropic, el id sin prefijo."""
+    if LLM_PROVIDER == "anthropic":
+        return model.removeprefix("anthropic.")
+    return model if model.startswith("anthropic.") else f"anthropic.{model}"
 
 
 def webhook_secret() -> str:
