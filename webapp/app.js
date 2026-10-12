@@ -165,6 +165,7 @@
     renderInsights(d);
     renderTransactions(d);
     renderSubscriptions(d);
+    renderReservesAndDebts(d);
     renderSettings(d);
   }
 
@@ -472,6 +473,45 @@
     }
   }
 
+  function renderReservesAndDebts(d) {
+    const res = $("#reserves");
+    res.replaceChildren();
+    if (!(d.reserves || []).length) res.append(el("li", { class: "empty" }, "Nada apartado todavía."));
+    for (const r of d.reserves || []) {
+      const li = el("li");
+      const head = el("div", { class: "budget-head" });
+      head.append(el("span", {}, r.nombre.charAt(0).toUpperCase() + r.nombre.slice(1)),
+        el("span", {}, `${money(r.gastado)} / ${money(r.monto)}`));
+      const pct = r.monto ? Math.min(100, (r.gastado / r.monto) * 100) : 0;
+      const meter = el("div", { class: "meter", role: "meter", "aria-valuenow": Math.round(pct),
+        "aria-valuemin": "0", "aria-valuemax": "100", "aria-label": r.nombre });
+      const fill = el("div");
+      fill.style.width = `${pct}%`;
+      fill.style.background = "var(--series-1)";
+      meter.append(fill);
+      li.append(head, meter, el("div", { class: "status-tag" }, `Quedan ${money(r.pendiente)} apartados`));
+      res.append(li);
+    }
+    const list = $("#debts");
+    list.replaceChildren();
+    if (!(d.debts || []).length) { list.append(el("li", { class: "empty" }, "Sin préstamos abiertos.")); return; }
+    for (const debt of d.debts) {
+      const li = el("li");
+      const left = el("div");
+      const label = debt.direction === "me_deben" ? `${debt.person} te debe` : `Le debes a ${debt.person}`;
+      let meta = debt.paid ? `abonado ${money(debt.paid)}` : "sin abonos";
+      if (debt.due_date) {
+        const due = new Date(`${debt.due_date}T12:00:00`);
+        const days = Math.round((due - new Date()) / 86400000);
+        meta += ` · ${days < 0 ? `vencido hace ${-days} d` : `vence ${due.toLocaleDateString("es", { day: "numeric", month: "short" })}`}`;
+      }
+      left.append(el("div", {}, label), el("div", { class: "meta" }, meta));
+      const right = el("div", { class: `amt ${debt.direction === "me_deben" ? "income" : ""}` }, money(debt.balance));
+      li.append(left, right);
+      list.append(li);
+    }
+  }
+
   function renderSettings(d) {
     const form = $("#profile-form");
     if (document.activeElement && form.contains(document.activeElement)) return;
@@ -577,6 +617,11 @@
         "Prefiere comunicarse con notas de voz.",
       ],
       category_catalog: cats,
+      reserves: [{ nombre: "gasolina", monto: 200000, gastado: 120000, pendiente: 80000, categoria: "transporte" }],
+      debts: [
+        { id: "d1", direction: "me_deben", person: "Juan", amount: 50000, paid: 20000, balance: 30000, date: "2026-10-02", due_date: "2026-10-17" },
+        { id: "d2", direction: "debo", person: "Mi papá", amount: 300000, paid: 0, balance: 300000, date: "2026-09-20", due_date: "2026-10-30" },
+      ],
     });
   }
 

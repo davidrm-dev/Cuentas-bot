@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from . import categories, finance
 from .finance import Alert
 from .ledger import Ledger
-from .models import CYCLES, Subscription, Transaction, money
+from .models import CYCLES, Debt, Subscription, Transaction, money
 
 ALL_CATEGORIES = list(categories.CATEGORIES) + list(categories.INCOME_CATEGORIES)
 _DATE = {"type": "string", "description": "Fecha YYYY-MM-DD"}
@@ -143,6 +143,66 @@ TOOLS: list[dict[str, Any]] = [
                                 "description": "Margen para imprevistos en %, por defecto 10"},
             },
             "required": ["eventos"],
+        },
+    },
+    {
+        "name": "registrar_prestamo",
+        "description": (
+            "Registra dinero prestado. tipo 'me_deben' cuando el usuario le prestó a alguien ('le presté 50 mil a "
+            "Juan'); 'debo' cuando alguien le prestó o le debe a alguien ('le debo 100 mil a mi papá'). Si dice "
+            "cuándo se debe pagar, inclúyelo como fecha_limite para recordárselo."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tipo": {"type": "string", "enum": ["me_deben", "debo"]},
+                "persona": {"type": "string", "description": "Nombre de la persona, como la mencionó"},
+                "monto": {"type": "number"},
+                "fecha_limite": {**_DATE, "description": "Fecha acordada para pagar (YYYY-MM-DD), si la dijo"},
+                "nota": {"type": "string"},
+                "movimiento_hoy": {"type": "boolean", "description": (
+                    "true si el dinero se entregó/recibió ahora (afecta su saldo); false si es una deuda que ya "
+                    "existía de antes")},
+            },
+            "required": ["tipo", "persona", "monto"],
+        },
+    },
+    {
+        "name": "registrar_abono",
+        "description": (
+            "Registra un pago de un préstamo: cuando alguien le paga al usuario ('Juan me pagó 20 mil') o el usuario "
+            "paga una deuda ('le pagué 50 mil a mi papá'). Si no dice monto y dice que pagó todo, usa todo=true."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "persona": {"type": "string"},
+                "tipo": {"type": "string", "enum": ["me_deben", "debo"]},
+                "monto": {"type": "number"},
+                "todo": {"type": "boolean"},
+            },
+            "required": ["persona"],
+        },
+    },
+    {
+        "name": "listar_prestamos",
+        "description": "Lista lo que le deben al usuario y lo que él debe, con saldos y fechas límite.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "fijar_gasto_fijo",
+        "description": (
+            "Aparta cada mes dinero para un gasto fijo sin fecha exacta (gasolina, mercado, transporte, arriendo "
+            "compartido...) para que el usuario no se lo gaste en otra cosa. Monto 0 para quitarlo."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nombre": {"type": "string", "description": "Ej. gasolina"},
+                "monto_mensual": {"type": "number"},
+                "categoria": {"type": "string", "enum": list(categories.CATEGORIES)},
+            },
+            "required": ["nombre", "monto_mensual"],
         },
     },
     {
@@ -313,8 +373,9 @@ class ToolExecutor:
     def _t_evaluar_salida_o_compra(self, args: dict[str, Any]) -> dict[str, Any]:
         cost = self._amount(args["costo_estimado"]) if args.get("costo_estimado") else None
         subs = self.ledger.repo.list_subscriptions(self.ledger.profile.user_id)
+        debts = self.ledger.repo.list_debts(self.ledger.profile.user_id, include_closed=True)
         return finance.affordability(self.ledger.profile, self.ledger.month_transactions(), subs,
-                                     self.ledger.today, cost)
+                                     self.ledger.today, cost, debts)
 
     def _t_planificar_mes(self, args: dict[str, Any]) -> dict[str, Any]:
         events = []
@@ -329,8 +390,9 @@ class ToolExecutor:
         if not 0 <= buffer <= 50:
             raise ToolInputError("El colchón debe estar entre 0 y 50%")
         subs = self.ledger.repo.list_subscriptions(self.ledger.profile.user_id)
+        debts = self.ledger.repo.list_debts(self.ledger.profile.user_id, include_closed=True)
         plan = finance.plan_month(self.ledger.profile, self.ledger.month_transactions(), subs, self.ledger.today,
-                                  events, cash, daily, buffer)
+                                  events, cash, daily, buffer, debts)
         if plan["estado"] != "ok":
             return plan
         self.notes.append(finance.plan_text(plan))
@@ -347,6 +409,72 @@ class ToolExecutor:
                      "montos. Da un veredicto corto y 1 a 3 consejos prácticos (cómo abaratar los eventos, qué "
                      "recortar, cómo y cuándo devolver). Este cálculo no reserva su meta de ahorro."),
         }
+
+    def _find_debt(self, person: str, direction: str | None) -> Debt | None:
+        target = categories.normalize(person)
+        debts = [d for d in self.ledger.repo.list_debts(self.ledger.profile.user_id)
+                 if direction in (None, d.direction)]
+        exact = [d for d in debts if categories.normalize(d.person) == target]
+        partial = exact or [d for d in debts if target in categories.normalize(d.person)
+                            or categories.normalize(d.person) in target]
+        return sorted(partial, key=lambda d: d.date)[0] if partial else None
+
+    def _t_registrar_prestamo(self, args: dict[str, Any]) -> dict[str, Any]:
+        direction = args.get("tipo")
+        if direction not in ("me_deben", "debo"):
+            raise ToolInputError("tipo debe ser 'me_deben' o 'debo'")
+        person = str(args.get("persona") or "").strip()[:60]
+        if not person:
+            raise ToolInputError("Falta la persona")
+        due = self._date(args["fecha_limite"]).isoformat() if args.get("fecha_limite") else None
+        debt = Debt(user_id=self.ledger.profile.user_id, direction=direction, person=person,
+                    amount=self._amount(args.get("monto")), date=self.ledger.today.isoformat(), due_date=due,
+                    note=str(args.get("nota") or "")[:200], moved_money=args.get("movimiento_hoy", True) is not False)
+        self.ledger.repo.save_debt(debt)
+        same = [d for d in self.ledger.repo.list_debts(self.ledger.profile.user_id)
+                if d.direction == direction and categories.normalize(d.person) == categories.normalize(person)]
+        return {"registrado": debt.to_public(), "total_con_esa_persona": float(sum(d.balance for d in same)),
+                "recordatorio": "Se le recordará antes de la fecha límite" if due else
+                "Sin fecha límite: pregúntale si quiere que se lo recuerdes en una fecha"}
+
+    def _t_registrar_abono(self, args: dict[str, Any]) -> dict[str, Any]:
+        debt = self._find_debt(str(args.get("persona", "")), args.get("tipo"))
+        if debt is None:
+            open_debts = [f"{d.person} ({d.direction})" for d in self.ledger.repo.list_debts(self.ledger.profile.user_id)]
+            return {"error": "No encontré un préstamo abierto con esa persona", "prestamos_abiertos": open_debts}
+        amount = debt.balance if args.get("todo") or not args.get("monto") else self._amount(args["monto"])
+        applied = debt.add_payment(amount, self.ledger.today.isoformat())
+        self.ledger.repo.save_debt(debt)
+        result = {"persona": debt.person, "tipo": debt.direction, "abono": float(applied),
+                  "saldo_pendiente": float(debt.balance), "pagado_completo": debt.closed}
+        if amount > applied:
+            result["nota"] = f"El abono superaba la deuda; solo se aplicaron {float(applied)}"
+        return result
+
+    def _t_listar_prestamos(self, args: dict[str, Any]) -> dict[str, Any]:
+        debts = self.ledger.repo.list_debts(self.ledger.profile.user_id)
+        return {
+            "me_deben": [d.to_public() for d in debts if d.direction == "me_deben"],
+            "debo": [d.to_public() for d in debts if d.direction == "debo"],
+            "total_me_deben": float(sum((d.balance for d in debts if d.direction == "me_deben"), Decimal(0))),
+            "total_debo": float(sum((d.balance for d in debts if d.direction == "debo"), Decimal(0))),
+        }
+
+    def _t_fijar_gasto_fijo(self, args: dict[str, Any]) -> dict[str, Any]:
+        name = categories.normalize(str(args.get("nombre") or ""))[:40]
+        if not name:
+            raise ToolInputError("Falta el nombre del gasto fijo")
+        amount = self._amount(args.get("monto_mensual"), allow_zero=True)
+        p = self.ledger.profile
+        if amount == 0:
+            p.reserves.pop(name, None)
+        else:
+            category = args.get("categoria") if args.get("categoria") in categories.CATEGORIES else categories.guess(name)
+            p.reserves[name] = {"monto": amount, "categoria": category}
+        self.ledger.repo.save_profile(p)
+        pending = finance.reserves_remaining(p, self.ledger.month_transactions())
+        return {"gastos_fijos": [{"nombre": r["nombre"], "mensual": float(r["monto"]), "gastado_este_mes": float(r["gastado"]),
+                                  "por_gastar": float(r["pendiente"])} for r in pending]}
 
     def _t_actualizar_perfil(self, args: dict[str, Any]) -> dict[str, Any]:
         p = self.ledger.profile

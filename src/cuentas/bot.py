@@ -4,6 +4,8 @@ from __future__ import annotations
 import html
 import logging
 import re
+from datetime import date, timedelta
+from decimal import Decimal
 from typing import Any
 
 from . import assistant, categories, config, finance, learning, parsing, usage
@@ -25,7 +27,9 @@ HELP = (
     "• <i>¿Debería salir hoy?</i>\n"
     "• <i>Me voy a pasar este mes: tengo un concierto de 250 mil y una boda. ¿Cuánto le pido a mis papás?</i>\n"
     "• <i>Ponme un tope de 400 mil en ocio</i>\n\n"
-    "Comandos: /resumen /suscripciones /dashboard /deshacer /consumo /ayuda"
+    "• <i>Le presté 50 mil a Juan, me paga el viernes</i> · <i>Le debo 200 mil a mi papá</i>\n"
+    "• <i>Aparta 200 mil al mes para gasolina</i>\n\n"
+    "Comandos: /resumen /prestamos /fijos /dashboard /deshacer /consumo /ayuda"
 )
 
 
@@ -147,7 +151,8 @@ def handle_command(tg: Telegram, repo: Repository, profile: Profile, chat_id: in
         return True
     if cmd == "/resumen":
         subs = repo.list_subscriptions(profile.user_id)
-        tg.send(chat_id, finance.summary_text(profile, ledger.month_transactions(), subs, ledger.today),
+        debts = repo.list_debts(profile.user_id, include_closed=True)
+        tg.send(chat_id, finance.summary_text(profile, ledger.month_transactions(), subs, ledger.today, debts),
                 keyboard=webapp_button("📊 Ver dashboard completo"))
         return True
     if cmd == "/consumo":
@@ -156,17 +161,29 @@ def handle_command(tg: Telegram, repo: Repository, profile: Profile, chat_id: in
     if cmd == "/dashboard":
         tg.send(chat_id, "Tu dashboard con gráficas, presupuestos y movimientos:", keyboard=webapp_button())
         return True
-    if cmd == "/suscripciones":
+    if cmd in ("/suscripciones", "/fijos"):
         subs = repo.list_subscriptions(profile.user_id)
-        if not subs:
-            tg.send(chat_id, "No tienes suscripciones registradas. Dime algo como "
-                             "<i>pago Spotify 17 mil el 10 de cada mes</i>.")
-            return True
         cur = profile.currency
-        lines = [f"• <b>{html.escape(s.name)}</b>: {fmt(s.amount, cur)} ({s.cycle}) — próximo {s.next_charge}"
-                 for s in sorted(subs, key=lambda s: s.next_charge)]
-        lines.append(f"\nCosto fijo mensual: <b>{fmt(finance.monthly_fixed(subs), cur)}</b>")
-        tg.send(chat_id, "🔁 <b>Suscripciones</b>\n" + "\n".join(lines))
+        if not subs and not profile.reserves:
+            tg.send(chat_id, "No tienes pagos fijos registrados. Dime algo como "
+                             "<i>pago Spotify 17 mil el 10 de cada mes</i> o "
+                             "<i>gasto 200 mil al mes en gasolina</i>.")
+            return True
+        lines = []
+        if subs:
+            lines.append("🔁 <b>Suscripciones</b>")
+            lines += [f"• <b>{html.escape(s.name)}</b>: {fmt(s.amount, cur)} ({s.cycle}) — próximo {s.next_charge}"
+                      for s in sorted(subs, key=lambda s: s.next_charge)]
+            lines.append(f"Costo fijo mensual: <b>{fmt(finance.monthly_fixed(subs), cur)}</b>")
+        reserves = finance.reserves_remaining(profile, ledger.month_transactions())
+        if reserves:
+            lines.append("\n⛽ <b>Apartado cada mes</b>")
+            lines += [f"• {html.escape(r['nombre'].capitalize())}: {fmt(r['gastado'], cur)} de {fmt(r['monto'], cur)}"
+                      f" — quedan {fmt(r['pendiente'], cur)} apartados" for r in reserves]
+        tg.send(chat_id, "\n".join(lines))
+        return True
+    if cmd in ("/prestamos", "/deudas"):
+        tg.send(chat_id, debts_text(profile, repo.list_debts(profile.user_id), ledger.today))
         return True
     if cmd == "/deshacer":
         tx = repo.last_transaction(profile.user_id)
@@ -179,6 +196,60 @@ def handle_command(tg: Telegram, repo: Repository, profile: Profile, chat_id: in
     return False
 
 
+def debts_text(profile: Profile, debts: list, today: Any) -> str:
+    if not debts:
+        return ("No tienes préstamos registrados. Dime algo como <i>le presté 50 mil a Juan</i> "
+                "o <i>le debo 200 mil a mi papá, le pago el 30</i>.")
+    cur = profile.currency
+    lines = []
+    for direction, title in (("me_deben", "🤝 <b>Te deben</b>"), ("debo", "💳 <b>Debes</b>")):
+        group = sorted((d for d in debts if d.direction == direction), key=lambda d: d.due_date or "9999")
+        if not group:
+            continue
+        lines.append(title)
+        for d in group:
+            due = ""
+            if d.due_date:
+                days = (date.fromisoformat(d.due_date) - today).days
+                due = (f" — vence el {d.due_date[8:]}/{d.due_date[5:7]}" if days > 0 else
+                       " — <b>vence hoy</b>" if days == 0 else f" — <b>vencido hace {-days} días</b>")
+            paid = f" (abonado {fmt(d.paid, cur)})" if d.paid else ""
+            lines.append(f"• {html.escape(d.person)}: <b>{fmt(d.balance, cur)}</b>{paid}{due}")
+        total = sum((d.balance for d in group), Decimal(0))
+        lines.append(f"Total: {fmt(total, cur)}\n")
+    return "\n".join(lines).strip()
+
+
+def debt_keyboard(debt: Any) -> list[list[dict[str, Any]]]:
+    paid = "✅ Ya le pagué" if debt.direction == "debo" else "✅ Ya me pagó"
+    return [[{"text": paid, "callback_data": f"dp:{debt.id}"},
+             {"text": "⏰ En 3 días", "callback_data": f"dz:{debt.id}"}]]
+
+
+def handle_debt_callback(tg: Telegram, repo: Repository, profile: Profile, callback: dict[str, Any],
+                         action: str, debt_id: str) -> None:
+    message = callback.get("message") or {}
+    debt = repo.get_debt(profile.user_id, debt_id)
+    if debt is None or debt.closed:
+        tg.answer_callback(callback["id"], "Ese préstamo ya está saldado")
+        return
+    ledger = Ledger(repo, profile)
+    cur = profile.currency
+    if action == "dp":
+        paid = debt.add_payment(debt.balance, ledger.today.isoformat())
+        repo.save_debt(debt)
+        tg.answer_callback(callback["id"], "Registrado")
+        who = f"le pagaste a {debt.person}" if debt.direction == "debo" else f"{debt.person} te pagó"
+        tg.edit(message["chat"]["id"], message["message_id"], f"✅ Listo: {html.escape(who)} {fmt(paid, cur)}.")
+    else:  # dz: posponer
+        base = max(ledger.today, date.fromisoformat(debt.due_date)) if debt.due_date else ledger.today
+        debt.due_date = (base + timedelta(days=3)).isoformat()
+        repo.save_debt(debt)
+        tg.answer_callback(callback["id"], "Te lo recuerdo en 3 días")
+        tg.edit(message["chat"]["id"], message["message_id"],
+                f"⏰ Te recuerdo lo de {html.escape(debt.person)} el {debt.due_date[8:]}/{debt.due_date[5:7]}.")
+
+
 def handle_callback(tg: Telegram, repo: Repository, callback: dict[str, Any]) -> None:
     data = callback.get("data", "")
     message = callback.get("message") or {}
@@ -186,6 +257,9 @@ def handle_callback(tg: Telegram, repo: Repository, callback: dict[str, Any]) ->
     message_id = message.get("message_id")
     profile = repo.get_profile(callback["from"]["id"])
     parts = data.split(":")
+    if profile is not None and len(parts) == 2 and parts[0] in ("dp", "dz"):
+        handle_debt_callback(tg, repo, profile, callback, parts[0], parts[1])
+        return
     if profile is None or len(parts) < 3:
         tg.answer_callback(callback["id"], "Acción no válida")
         return

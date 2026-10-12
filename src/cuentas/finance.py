@@ -13,7 +13,7 @@ from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
 from . import categories
-from .models import Profile, Subscription, Transaction, money
+from .models import Debt, Profile, Subscription, Transaction, money
 
 ZERO = Decimal("0")
 
@@ -87,6 +87,52 @@ def pending_charges_this_month(subs: Iterable[Subscription], today: date) -> Dec
     return total
 
 
+def reserves_remaining(profile: Profile, month_txs: Iterable[Transaction]) -> list[dict[str, Any]]:
+    """Cuánto falta gastar de cada gasto fijo reservado (ej. gasolina) en el mes."""
+    out = []
+    for name, r in profile.reserves.items():
+        key = categories.normalize(name)
+        spent = ZERO
+        for tx in month_txs:
+            if tx.kind != "expense":
+                continue
+            text = categories.normalize(f"{tx.description} {tx.merchant}")
+            if key == r.get("categoria") and tx.category == key or key in text:
+                spent += tx.amount
+        out.append({"nombre": name, "monto": r["monto"], "gastado": spent,
+                    "pendiente": max(r["monto"] - spent, ZERO), "categoria": r.get("categoria")})
+    return out
+
+
+def debt_cash_flow(debts: Iterable[Debt], start: date, end: date) -> Decimal:
+    """Efecto neto de los préstamos en el dinero disponible entre dos fechas (+ entra, - sale)."""
+    net = ZERO
+    for d in debts:
+        sign = Decimal(-1) if d.direction == "me_deben" else Decimal(1)
+        if d.moved_money and start.isoformat() <= d.date <= end.isoformat():
+            net += sign * d.amount  # presté: sale; me prestaron: entra
+        for p in d.payments:
+            if start.isoformat() <= p["date"] <= end.isoformat():
+                net -= sign * money(p["amount"])  # me pagan: entra; pago yo: sale
+    return net
+
+
+def payables_due(debts: Iterable[Debt], until: date) -> Decimal:
+    """Saldo de lo que debo con fecha límite hasta `until` (incluye lo vencido)."""
+    return sum((d.balance for d in debts if d.direction == "debo" and not d.closed and d.due_date
+                and d.due_date <= until.isoformat()), ZERO)
+
+
+def committed_month(profile: Profile, month_txs: list[Transaction], subs: Iterable[Subscription], today: date,
+                    debts: Iterable[Debt] = ()) -> Decimal:
+    """Lo ya gastado más lo que el mes todavía exige: suscripciones, reservas, deudas que vencen y préstamos."""
+    debts = list(debts)
+    start, end = month_bounds(today)
+    return (totals(month_txs)["expense"] + pending_charges_this_month(subs, today)
+            + sum((r["pendiente"] for r in reserves_remaining(profile, month_txs)), ZERO)
+            + payables_due(debts, end) - debt_cash_flow(debts, start, end))
+
+
 def reference_income(profile: Profile) -> Decimal | None:
     """Ingreso declarado o, si no lo dio, el que el bot aprendió de sus registros."""
     if profile.monthly_income:
@@ -115,7 +161,7 @@ def upcoming_charges(subs: Iterable[Subscription], today: date, days: int = 7) -
 # ---------------------------------------------------------------------------
 
 def check_alerts(profile: Profile, tx: Transaction, month_txs: list[Transaction],
-                 subs: list[Subscription], today: date) -> list[Alert]:
+                 subs: list[Subscription], today: date, debts: Iterable[Debt] = ()) -> list[Alert]:
     """Alertas disparadas por un gasto recién registrado (month_txs ya lo incluye)."""
     if tx.kind != "expense":
         return []
@@ -142,11 +188,12 @@ def check_alerts(profile: Profile, tx: Transaction, month_txs: list[Transaction]
     # 2) Gasto total contra lo que se puede gastar sin tocar la meta de ahorro
     spendable = spendable_income(profile)
     if spendable:
-        committed = t["expense"] + pending_charges_this_month(subs, today)
+        committed = committed_month(profile, month_txs, subs, today, debts)
         pct = committed / spendable * 100
         if pct >= 100:
             alerts.append(Alert("critical", f"spendable:{ym}:100",
-                                f"Este mes ya comprometiste {fmt(committed, cur)}, más de lo disponible "
+                                f"Entre lo gastado, tus fijos y lo apartado, este mes ya comprometiste "
+                                f"{fmt(committed, cur)}, más de lo disponible "
                                 f"({fmt(spendable, cur)}) sin tocar tu meta de ahorro del "
                                 f"{profile.savings_goal_pct:.0f}%."))
         elif pct >= 85:
@@ -192,7 +239,7 @@ def check_alerts(profile: Profile, tx: Transaction, month_txs: list[Transaction]
 # ---------------------------------------------------------------------------
 
 def affordability(profile: Profile, month_txs: list[Transaction], subs: list[Subscription],
-                  today: date, cost: Decimal | None = None) -> dict[str, Any]:
+                  today: date, cost: Decimal | None = None, debts: Iterable[Debt] = ()) -> dict[str, Any]:
     cur = profile.currency
     spendable = spendable_income(profile)
     _, last = month_bounds(today)
@@ -221,8 +268,11 @@ def affordability(profile: Profile, month_txs: list[Transaction], subs: list[Sub
                       razon="No conozco tus ingresos todavía; dímelos para poder responder con números.")
         return result
 
-    committed = t["expense"] + pending_charges_this_month(subs, today)
+    committed = committed_month(profile, month_txs, subs, today, debts)
     remaining = spendable - committed
+    reserved = [r for r in reserves_remaining(profile, month_txs) if r["pendiente"] > 0]
+    if reserved:
+        result["apartado_para_fijos"] = {r["nombre"]: float(r["pendiente"]) for r in reserved}
     daily = money(remaining / days_left) if remaining > 0 else ZERO
     result.update(
         disponible_mes=float(spendable),
@@ -306,7 +356,8 @@ def daily_variable_rate(profile: Profile, month_txs: list[Transaction], today: d
 
 def plan_month(profile: Profile, month_txs: list[Transaction], subs: list[Subscription], today: date,
                events: list[dict[str, Any]], cash_now: Decimal | None = None,
-               daily_estimate: Decimal | None = None, buffer_pct: Decimal = Decimal("10")) -> dict[str, Any]:
+               daily_estimate: Decimal | None = None, buffer_pct: Decimal = Decimal("10"),
+               debts: Iterable[Debt] = ()) -> dict[str, Any]:
     """Cuánto dinero falta (y cuánto pedir prestado) para cubrir el día a día y los eventos hasta el próximo pago."""
     _, month_end = month_bounds(today)
     if profile.payday:
@@ -326,7 +377,9 @@ def plan_month(profile: Profile, month_txs: list[Transaction], subs: list[Subscr
         available, available_source = cash_now, "saldo que indicó el usuario"
     else:
         income = t["income"] if t["income"] > 0 else reference_income(profile)
-        available = money(income - t["expense"]) if income is not None else None
+        month_start, month_end_ = month_bounds(today)
+        flow = debt_cash_flow(debts, month_start, month_end_)
+        available = money(income - t["expense"] + flow) if income is not None else None
         available_source = "ingresos del mes menos gastos registrados"
 
     missing = []
@@ -342,7 +395,11 @@ def plan_month(profile: Profile, month_txs: list[Transaction], subs: list[Subscr
         when = date.fromisoformat(e["fecha"]) if e.get("fecha") else None
         (later if when and when > end else in_range).append(e)
     events_total = sum((money(e["monto"]) for e in in_range), ZERO)
-    fixed_pending = charges_between(subs, today, end)
+    debts = list(debts)
+    debts_due = payables_due(debts, end)
+    reserves = [r for r in reserves_remaining(profile, month_txs) if r["pendiente"] > 0]
+    reserved = sum((r["pendiente"] for r in reserves), ZERO)
+    fixed_pending = charges_between(subs, today, end) + debts_due + reserved
     living = money(rate * days)
     needed = living + fixed_pending + events_total
     buffer = money(needed * buffer_pct / 100)
@@ -362,7 +419,9 @@ def plan_month(profile: Profile, month_txs: list[Transaction], subs: list[Subscr
         "gasto_diario": float(rate),
         "gasto_diario_fuente": rate_source,
         "gasto_dia_a_dia": float(living),
-        "cobros_fijos_pendientes": float(fixed_pending),
+        "cobros_fijos_pendientes": float(fixed_pending - debts_due - reserved),
+        "deudas_que_vencen": float(debts_due),
+        "apartado_fijos": {r["nombre"]: float(r["pendiente"]) for r in reserves},
         "eventos": [{"descripcion": e.get("descripcion", ""), "monto": float(money(e["monto"])),
                      "fecha": e.get("fecha")} for e in in_range],
         "total_eventos": float(events_total),
@@ -377,6 +436,9 @@ def plan_month(profile: Profile, month_txs: list[Transaction], subs: list[Subscr
     }
     if later:
         result["eventos_despues_del_pago"] = [e.get("descripcion", "") for e in later]
+    owed = [d for d in debts if d.direction == "me_deben" and not d.closed]
+    if owed:
+        result["te_deben"] = {d.person: float(d.balance) for d in owed}
     income = reference_income(profile)
     if income and loan > 0:
         result["prestamo_vs_ingreso_pct"] = round(float(loan / income * 100), 1)
@@ -396,7 +458,11 @@ def plan_text(plan: dict[str, Any]) -> str:
         when = f" ({e['fecha'][8:]}/{e['fecha'][5:7]})" if e.get("fecha") else ""
         lines.append(f"• {e['descripcion']}{when}: {m(e['monto'])}")
     if plan["cobros_fijos_pendientes"]:
-        lines.append(f"• Cobros fijos pendientes: {m(plan['cobros_fijos_pendientes'])}")
+        lines.append(f"• Suscripciones que se cobran: {m(plan['cobros_fijos_pendientes'])}")
+    for name, amount in plan.get("apartado_fijos", {}).items():
+        lines.append(f"• Apartado para {name}: {m(amount)}")
+    if plan.get("deudas_que_vencen"):
+        lines.append(f"• Deudas que vencen antes: {m(plan['deudas_que_vencen'])}")
     lines += [f"• Colchón {plan['colchon_pct']:.0f}%: {m(plan['colchon'])}",
               f"<b>Necesitas: {m(plan['necesita'])}</b> · tienes: {m(plan['disponible'])}", ""]
     if plan["monto_a_pedir"] > 0:
@@ -408,6 +474,8 @@ def plan_text(plan: dict[str, Any]) -> str:
                          f"{m(plan['cuota_sugerida_10pct_ingreso'])} (10% de tu ingreso)")
     else:
         lines.append(f"✅ No necesitas pedir prestado; te sobrarían ~{m(plan['sobrante_si_no_pide'])}")
+    if plan.get("te_deben"):
+        lines.append("Te deben (no lo conté como seguro): " + ", ".join(f"{p} {m(v)}" for p, v in plan["te_deben"].items()))
     if plan.get("eventos_despues_del_pago"):
         lines.append("Después de tu pago (no incluidos): " + ", ".join(plan["eventos_despues_del_pago"]))
     lines.append(f"<i>Gasto diario según {plan['gasto_diario_fuente']}; disponible según {plan['disponible_fuente']}.</i>")
@@ -442,7 +510,8 @@ def summary_payload(profile: Profile, txs: list[Transaction], start: date, end: 
     }
 
 
-def summary_text(profile: Profile, txs: list[Transaction], subs: list[Subscription], today: date) -> str:
+def summary_text(profile: Profile, txs: list[Transaction], subs: list[Subscription], today: date,
+                 debts: Iterable[Debt] = ()) -> str:
     """Resumen corto del mes para el chat (el detalle va en la mini app)."""
     cur = profile.currency
     t = totals(txs)
@@ -451,14 +520,26 @@ def summary_text(profile: Profile, txs: list[Transaction], subs: list[Subscripti
              f"Gastos: <b>{fmt(t['expense'], cur)}</b>"]
     spendable = spendable_income(profile)
     if spendable:
-        committed = t["expense"] + pending_charges_this_month(subs, today)
+        debts = list(debts)
+        committed = committed_month(profile, txs, subs, today, debts)
         lines.append(f"Disponible restante: <b>{fmt(spendable - committed, cur)}</b>")
+        pending = [r for r in reserves_remaining(profile, txs) if r["pendiente"] > 0]
+        if pending:
+            lines.append("Apartado para fijos: " + ", ".join(f"{r['nombre']} {fmt(r['pendiente'], cur)}"
+                                                             for r in pending))
     if t["by_category"]:
         lines.append("")
         for cat, amount in list(t["by_category"].items())[:5]:
             budget = profile.budgets.get(cat)
             extra = f" / {fmt(budget, cur)}" if budget else ""
             lines.append(f"{categories.label(cat)}: {fmt(amount, cur)}{extra}")
+    open_debts = [d for d in debts if not d.closed]
+    owed = sum((d.balance for d in open_debts if d.direction == "me_deben"), ZERO)
+    owe = sum((d.balance for d in open_debts if d.direction == "debo"), ZERO)
+    if owed or owe:
+        lines.append("")
+        lines.append(" · ".join(x for x in (f"Te deben {fmt(owed, cur)}" if owed else "",
+                                            f"Debes {fmt(owe, cur)}" if owe else "") if x) + " (/prestamos)")
     nxt = upcoming_charges(subs, today, 7)
     if nxt:
         lines.append("")
@@ -467,7 +548,7 @@ def summary_text(profile: Profile, txs: list[Transaction], subs: list[Subscripti
 
 
 def dashboard(profile: Profile, month_txs: list[Transaction], history_txs: list[Transaction],
-              subs: list[Subscription], month: date, today: date) -> dict[str, Any]:
+              subs: list[Subscription], month: date, today: date, debts: Iterable[Debt] = ()) -> dict[str, Any]:
     """Datos completos para la mini app."""
     start, end = month_bounds(month)
     t = totals(month_txs)
@@ -495,7 +576,9 @@ def dashboard(profile: Profile, month_txs: list[Transaction], history_txs: list[
         if tx.kind == "expense" and tx.source != "subscription":
             weekday[date.fromisoformat(tx.date).weekday()] += float(tx.amount)
 
-    committed = t["expense"] + (pending_charges_this_month(subs, today) if is_current else ZERO)
+    debts = list(debts)
+    committed = (committed_month(profile, month_txs, subs, today, debts) if is_current
+                 else t["expense"] - debt_cash_flow(debts, start, end))
     budgets = []
     for cat, limit in profile.budgets.items():
         spent = t["by_category"].get(cat, ZERO)
@@ -542,5 +625,9 @@ def dashboard(profile: Profile, month_txs: list[Transaction], history_txs: list[
         "transactions": [tx.to_public() for tx in sorted(month_txs, key=lambda x: (x.date, x.created_at),
                                                          reverse=True)],
         "insights": profile.insights,
+        "reserves": [{**r, "monto": float(r["monto"]), "gastado": float(r["gastado"]),
+                      "pendiente": float(r["pendiente"])} for r in reserves_remaining(profile, month_txs)],
+        "debts": [d.to_public() for d in sorted(debts, key=lambda d: (d.due_date or "9999", d.date))
+                  if not d.closed],
         "category_catalog": {k: categories.label(k) for k in categories.CATEGORIES},
     }

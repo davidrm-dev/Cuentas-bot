@@ -170,6 +170,9 @@ def context_for_llm(profile: Profile) -> str:
     if profile.budgets:
         lines.append("Presupuestos mensuales: " + ", ".join(
             f"{c}={fmt(v, cur)}" for c, v in profile.budgets.items()))
+    if profile.reserves:
+        lines.append("Gastos fijos apartados cada mes: " + ", ".join(
+            f"{name}={fmt(r['monto'], cur)}" for name, r in profile.reserves.items()))
     if profile.merchant_categories:
         sample = list(profile.merchant_categories.items())[-25:]
         lines.append("Comercios ya clasificados por el usuario: " + ", ".join(f"{m}→{c}" for m, c in sample))

@@ -164,6 +164,8 @@ class Profile:
     payday: int | None = None  # día del mes en que cobra
     savings_goal_pct: Decimal = Decimal("10")
     budgets: dict[str, Decimal] = field(default_factory=dict)  # categoria -> tope mensual
+    # Gastos fijos sin fecha exacta que hay que apartar cada mes (ej. gasolina): nombre -> {monto, categoria}
+    reserves: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Lo que el bot aprende del usuario (ver learning.py)
     merchant_categories: dict[str, str] = field(default_factory=dict)
     stats: dict[str, Any] = field(default_factory=dict)
@@ -194,6 +196,8 @@ class Profile:
             payday=int(payday) if payday is not None else None,
             savings_goal_pct=Decimal(str(item.get("savings_goal_pct", "10"))),
             budgets={k: money(v) for k, v in (item.get("budgets") or {}).items()},
+            reserves={k: {"monto": money(v["monto"]), "categoria": v.get("categoria", "otros")}
+                      for k, v in (item.get("reserves") or {}).items()},
             merchant_categories=dict(item.get("merchant_categories") or {}),
             stats=_plain(item.get("stats") or {}),
             insights=list(item.get("insights") or []),
@@ -221,3 +225,65 @@ def to_dynamo(value: Any) -> Any:
     if isinstance(value, list):
         return [to_dynamo(v) for v in value]
     return value
+
+
+DEBT_DIRECTIONS = ("me_deben", "debo")
+
+
+@dataclass
+class Debt:
+    """Dinero prestado: "me_deben" (le presté a alguien) o "debo" (alguien me prestó)."""
+
+    user_id: int
+    direction: str
+    person: str
+    amount: Decimal
+    date: str  # cuándo se originó (YYYY-MM-DD)
+    due_date: str | None = None
+    note: str = ""
+    moved_money: bool = True  # False si es una deuda vieja: no afecta el saldo de este mes
+    payments: list[dict[str, Any]] = field(default_factory=list)  # [{"date", "amount"}]
+    closed: bool = False
+    id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=utcnow_iso)
+
+    @property
+    def sk(self) -> str:
+        return f"DEBT#{self.id}"
+
+    @property
+    def paid(self) -> Decimal:
+        return sum((money(p["amount"]) for p in self.payments), Decimal(0))
+
+    @property
+    def balance(self) -> Decimal:
+        return max(self.amount - self.paid, Decimal(0))
+
+    def add_payment(self, amount: Decimal, when: str) -> Decimal:
+        """Registra un abono (sin pasarse del saldo) y cierra la deuda si queda en cero."""
+        applied = min(amount, self.balance)
+        self.payments.append({"date": when, "amount": applied})
+        self.closed = self.balance == 0
+        return applied
+
+    def to_item(self) -> dict[str, Any]:
+        item = asdict(self)
+        item.update(PK=f"USER#{self.user_id}", SK=self.sk, type="debt")
+        if self.due_date is None:
+            item.pop("due_date")
+        return item
+
+    @classmethod
+    def from_item(cls, item: dict[str, Any]) -> "Debt":
+        return cls(
+            user_id=int(item["user_id"]), direction=item["direction"], person=item["person"],
+            amount=money(item["amount"]), date=item["date"], due_date=item.get("due_date"),
+            note=item.get("note", ""), moved_money=bool(item.get("moved_money", True)),
+            payments=[{"date": p["date"], "amount": money(p["amount"])} for p in item.get("payments") or []],
+            closed=bool(item.get("closed", False)), id=item["id"], created_at=item.get("created_at", ""),
+        )
+
+    def to_public(self) -> dict[str, Any]:
+        return {"id": self.id, "direction": self.direction, "person": self.person, "amount": float(self.amount),
+                "paid": float(self.paid), "balance": float(self.balance), "date": self.date,
+                "due_date": self.due_date, "note": self.note, "closed": self.closed}

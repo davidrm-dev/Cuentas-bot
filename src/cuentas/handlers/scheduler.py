@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 from .. import bot, categories, finance, learning
 from ..finance import fmt, month_bounds, previous_month
 from ..ledger import Ledger
-from ..models import Profile, Subscription, Transaction
+from ..models import Debt, Profile, Subscription, Transaction
 from ..repository import Repository
 from ..telegram import Telegram, webapp_button
 
@@ -72,13 +72,20 @@ def run_for_user(repo: Repository, tg: Telegram, profile: Profile, due: list[Sub
         tg.send(profile.chat_id, "⏰ <b>Próximos cobros</b>\n" + "\n".join(lines) +
                 "\n\n¿Alguna ya no la usas? Dime <i>cancela X</i> y dejo de contarla.")
 
-    # 3) Aprendizaje
+    # 3) Préstamos: recordatorios por fecha límite
+    debts = repo.list_debts(profile.user_id, include_closed=True)
+    for debt in debts:
+        reminder = debt_reminder(profile, debt, today, ledger, subs, debts)
+        if reminder and repo.claim_alert(profile.user_id, reminder[0]):
+            tg.send(profile.chat_id, reminder[1], keyboard=bot.debt_keyboard(debt))
+
+    # 4) Aprendizaje
     history_start = month_bounds(today.replace(day=1) - timedelta(days=31 * LEARNING_MONTHS))[0]
     history = repo.list_transactions(profile.user_id, history_start.isoformat(), today.isoformat())
     learning.recompute(profile, history, today)
     repo.save_profile(profile)
 
-    # 4) Cierre de mes
+    # 5) Cierre de mes
     if today.day == 1:
         prev = previous_month(today)
         if repo.claim_alert(profile.user_id, f"monthly:{prev.strftime('%Y-%m')}"):
@@ -87,6 +94,41 @@ def run_for_user(repo: Repository, tg: Telegram, profile: Profile, due: list[Sub
             if month_txs:
                 tg.send(profile.chat_id, monthly_close_text(profile, month_txs, prev),
                         keyboard=webapp_button("📊 Ver el mes completo"))
+
+
+def debt_reminder(profile: Profile, debt: Debt, today: date, ledger: Ledger, subs: list[Subscription],
+                  debts: list[Debt]) -> tuple[str, str] | None:
+    """(clave única, texto) si toca recordar este préstamo hoy: 3 días antes, 1 día antes, el día y cada semana vencido."""
+    if debt.closed or not debt.due_date:
+        return None
+    days = (date.fromisoformat(debt.due_date) - today).days
+    if days in (3, 1):
+        bucket, when = f"{days}d", f"en {days} día{'s' if days > 1 else ''} ({debt.due_date[8:]}/{debt.due_date[5:7]})"
+    elif days == 0:
+        bucket, when = "hoy", "hoy"
+    elif days < 0 and (-days) % 7 == 1:
+        bucket, when = f"vencido{-days}", f"hace {-days} día{'s' if -days > 1 else ''}"
+    else:
+        return None
+    cur = profile.currency
+    name, amount = html.escape(debt.person), fmt(debt.balance, cur)
+    if debt.direction == "me_deben":
+        verb = "quedó de pagarte" if days >= 0 else "debía pagarte"
+        text = f"🔔 <b>{name}</b> te debe <b>{amount}</b> y {verb} {when}. ¿Ya te pagó?"
+    else:
+        verb = "vence" if days >= 0 else "venció"
+        text = f"⏰ Le debes <b>{amount}</b> a <b>{name}</b>; {verb} {when}."
+        spendable = finance.spendable_income(profile)
+        if spendable:
+            # committed ya incluye esta deuda, así que lo que queda es después de pagarla.
+            left = spendable - finance.committed_month(profile, ledger.month_transactions(), subs, today, debts)
+            text += (f"\nCon lo que tienes planeado te alcanza: después de pagarla te quedarían ~{fmt(left, cur)} "
+                     "para el resto del mes." if left >= 0 else
+                     f"\nOjo: este mes vas justo, te faltarían ~{fmt(-left, cur)}. Si quieres, pregúntame cómo "
+                     "organizar el pago o si conviene abonar una parte.")
+        else:
+            text += "\nAparta ese dinero para no gastártelo. Si me dices tu ingreso te ayudo a planear el pago."
+    return f"debt:{debt.id}:{debt.due_date}:{bucket}", text
 
 
 def monthly_close_text(profile: Profile, txs: list[Transaction], month: date) -> str:
@@ -102,6 +144,9 @@ def monthly_close_text(profile: Profile, txs: list[Transaction], month: date) ->
         lines.append(f"Ahorraste el {rate:.0f}% " + ("✅" if rate >= goal else f"(meta: {goal:.0f}%)"))
     for cat, amount in list(t["by_category"].items())[:3]:
         lines.append(f"• {categories.label(cat)}: {fmt(amount, cur)}")
+    if profile.reserves:
+        lines.append("Este mes vuelvo a apartar: " + ", ".join(
+            f"{n} {fmt(r['monto'], cur)}" for n, r in profile.reserves.items()))
     over = [c for c, b in profile.budgets.items() if t["by_category"].get(c, 0) > b]
     if over:
         lines.append("Te pasaste en: " + ", ".join(categories.label(c) for c in over))

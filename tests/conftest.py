@@ -10,7 +10,7 @@ import pytest
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 os.environ.setdefault("CUENTAS_BOT_TELEGRAM_TOKEN", "123:TEST")
 
-from cuentas.models import Profile, Subscription, Transaction  # noqa: E402
+from cuentas.models import Debt, Profile, Subscription, Transaction  # noqa: E402
 
 
 class FakeRepo:
@@ -20,6 +20,7 @@ class FakeRepo:
         self.profiles: dict[int, Profile] = {}
         self.txs: dict[tuple[int, str], Transaction] = {}
         self.subs: dict[tuple[int, str], Subscription] = {}
+        self.debts: dict[tuple[int, str], Debt] = {}
         self.messages: list[tuple[int, str, str]] = []
         self.alerts: set[tuple[int, str]] = set()
 
@@ -60,6 +61,15 @@ class FakeRepo:
 
     def due_subscriptions(self, until: str):
         return [s for s in self.subs.values() if s.active and s.next_charge <= until]
+
+    def save_debt(self, debt: Debt) -> None:
+        self.debts[(debt.user_id, debt.id)] = debt
+
+    def list_debts(self, user_id: int, include_closed: bool = False):
+        return [d for (u, _), d in self.debts.items() if u == user_id and (include_closed or not d.closed)]
+
+    def get_debt(self, user_id: int, debt_id: str):
+        return self.debts.get((user_id, debt_id))
 
     def add_message(self, user_id: int, role: str, text: str, ttl_days: int = 7) -> None:
         self.messages.append((user_id, role, text))

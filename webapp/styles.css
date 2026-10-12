@@ -134,7 +134,7 @@ select, input { font: inherit; color: var(--text-primary); background: var(--sur
 .tx .desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tx .cat { color: var(--text-secondary); font-size: 12px; }
 .tx .amt { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.tx .amt.income { color: var(--good-text); }
+.tx .amt.income, .rows .amt.income { color: var(--good-text); }
 .rows li { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid var(--grid); }
 .rows li:first-child { border-top: 0; }
 .rows .meta { color: var(--text-secondary); font-size: 12px; }

@@ -41,6 +41,12 @@ alguien) usa `planificar_mes` con cada gasto planeado como evento. Si `estado` e
 exactamente lo que falta. El desglose con las cifras se le envía al usuario automáticamente: tú responde en 2 a \
 4 líneas con un veredicto y consejos prácticos (cómo abaratar un evento, qué recortar, cómo devolver el préstamo). \
 Sé honesto, sin sermones, y no escribas cifras que la herramienta no haya dado.
+- Préstamos: "le presté X a Juan" → `registrar_prestamo` tipo me_deben; "le debo X a mi papá" o "me prestaron" → \
+tipo debo. Si no dice cuándo se paga, pregunta una vez si quiere que se lo recuerdes en alguna fecha. Pagos de \
+préstamos ("Juan me pagó", "le pagué a mi papá") van con `registrar_abono`, nunca como gasto o ingreso. Cuando se \
+acerque una deuda, ayúdale a planear el pago con lo que tiene disponible.
+- Gastos fijos sin fecha exacta (gasolina, mercado, transporte del mes) van con `fijar_gasto_fijo`: ese dinero se \
+aparta del disponible para que no se lo gaste en otra cosa. Recuérdalo cuando pregunte si puede gastar.
 - Para consultas de gastos usa `consultar_gastos` con fechas exactas. Nunca inventes cifras: todo número sale \
 de una herramienta o del contexto.
 - Si el usuario te da datos de su situación (sueldo, día de cobro, moneda, meta de ahorro), guárdalos con \
@@ -85,6 +91,13 @@ def _context_block(ledger: Ledger, history: list[dict[str, str]]) -> str:
         f"Fecha y hora local: {learning.WEEKDAYS[local_now.weekday()]} {local_now.strftime('%Y-%m-%d %H:%M')}",
         learning.context_for_llm(ledger.profile),
     ]
+    debts = ledger.repo.list_debts(ledger.profile.user_id)
+    if debts:
+        cur = ledger.profile.currency
+        lines = [f"{d.person} le debe {fmt(d.balance, cur)} al usuario" if d.direction == "me_deben"
+                 else f"el usuario le debe {fmt(d.balance, cur)} a {d.person}" for d in debts[:10]]
+        lines = [f"{line} (vence {d.due_date})" if d.due_date else line for line, d in zip(lines, debts)]
+        parts.append("Préstamos abiertos: " + "; ".join(lines))
     if history:
         parts.append("Conversación reciente:")
         parts += [f"{'Usuario' if m['role'] == 'user' else 'Cuentas'}: {m['text']}" for m in history]
