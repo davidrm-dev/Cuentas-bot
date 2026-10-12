@@ -104,7 +104,7 @@ def test_assistant_tool_loop(monkeypatch, repo, tg, profile):
     fake = FakeMessages()
     monkeypatch.setattr(assistant, "_client", lambda: SimpleNamespace(beta=SimpleNamespace(messages=fake)))
     bot.handle_conversation(tg, repo, profile, 1, "ayer gasté 25 mil en el mercado")
-    assert tg.sent[0]["text"].startswith("Anotado")
+    assert tg.sent[0]["text"].startswith("✅ Gasto: <b>$25.000 COP</b> · 🛒 Supermercado")
     assert any(b["callback_data"].startswith("u:") for b in tg.sent[0]["keyboard"][0])
     tool_turn = fake.calls[1]["messages"][2]  # usuario, asistente (tool_use), resultados
     assert tool_turn["content"][0]["type"] == "tool_result"
@@ -127,3 +127,36 @@ def test_assistant_offline_fallback(monkeypatch, repo, profile, now):
     result = assistant.reply(Ledger(repo, profile, now), "gasté 8000 en taxi")
     assert "Gasto registrado" in result.text
     assert result.recorded[0].category == "transporte"
+
+
+def test_tidy_reply_cleans_nova_output():
+    from cuentas.bot import tidy_reply
+
+    raw = ("<response> He registrado el ingreso de <b>20000 COP</b> por el arreglo del computador en la "
+           "categoría <i>otros_ingresos</i>. </response>")
+    out = tidy_reply(raw, "COP")
+    assert "<response>" not in out and "$20.000 COP" in out and "💰 Otros ingresos" in out and "<b>" in out
+
+
+def test_registration_confirmation_is_deterministic(monkeypatch, repo, tg, profile):
+    from types import SimpleNamespace
+
+    class Fake:
+        n = 0
+
+        def create(self, **kw):
+            self.n += 1
+            if self.n == 1:
+                use = SimpleNamespace(type="tool_use", id="t", name="registrar_movimientos", input={"movimientos": [
+                    {"tipo": "ingreso", "monto": 20000, "descripcion": "Arreglo del computador",
+                     "categoria": "otros_ingresos", "cuenta": "nequi"}]})
+                return SimpleNamespace(stop_reason="tool_use", content=[use], usage=None)
+            return SimpleNamespace(stop_reason="end_turn", usage=None, content=[SimpleNamespace(
+                type="text", text="<response>He registrado 20000 COP en otros_ingresos. ¿Fue en efectivo?</response>")])
+
+    monkeypatch.setattr(assistant, "_client", lambda: SimpleNamespace(beta=SimpleNamespace(messages=Fake())))
+    bot.handle_conversation(tg, repo, profile, 1, "ayer me pagaron 20 mil por arreglar un computador")
+    text = tg.sent[0]["text"]
+    assert text.startswith("✅ Ingreso: <b>$20.000 COP</b> · 💰 Otros ingresos · 💜 Nequi")
+    assert "<i>Arreglo del computador</i>" in text and "¿Fue en efectivo?" in text
+    assert "<response>" not in text and "He registrado" not in text

@@ -87,6 +87,42 @@ def drop_unbacked_amounts(text: str, notes: list[str]) -> str:
     return " ".join(kept).strip() or "Ese es el plan. Si quieres, ajustamos los eventos o el colchón."
 
 
+_TELEGRAM_TAGS = re.compile(r"</?(?!(?:b|i|u|s|code|pre|a)\b)[a-zA-Z_][\w-]*[^>]*>")
+_BARE_AMOUNT = re.compile(r"(?<![\d.,$])\$?\s?(\d{4,})(?:[.,]00)?\s?(COP|USD|EUR|MXN)\b")
+
+
+def tidy_reply(text: str, currency: str) -> str:
+    """Deja la respuesta del modelo lista para Telegram: sin etiquetas desconocidas (<response>...),
+    montos con formato local y nombres de categorías legibles en lugar de sus claves internas."""
+    text = _TELEGRAM_TAGS.sub("", text)
+    text = _BARE_AMOUNT.sub(lambda m: fmt(Decimal(m.group(1)), m.group(2)), text)
+    for key in list(categories.CATEGORIES) + list(categories.INCOME_CATEGORIES):
+        if "_" in key or f"<i>{key}</i>" in text:
+            text = text.replace(f"<i>{key}</i>", categories.label(key)).replace(key, categories.label(key))
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def confirmation_text(profile: Profile, recorded: list[Transaction], model_text: str) -> str:
+    cur = profile.currency
+    today = finance.today_for(profile).isoformat()
+    lines = []
+    for tx in recorded:
+        verb = "Ingreso" if tx.kind == "income" else "Gasto"
+        via = f" · {accounts.label(tx.account)}" if tx.account else ""
+        when = "" if tx.date == today else f" · {tx.date[8:]}/{tx.date[5:7]}"
+        lines.append(f"✅ {verb}: <b>{fmt(tx.amount, cur)}</b> · {categories.label(tx.category)}{via}{when}")
+        if tx.description:
+            lines.append(f"<i>{html.escape(tx.description)}</i>")
+    accounts_used = {tx.account for tx in recorded if tx.account in profile.accounts}
+    for acc in accounts_used:
+        lines.append(f"Saldo en {accounts.ACCOUNTS[acc][0]}: {fmt(profile.accounts[acc]['saldo'], cur)}")
+    questions = [s for s in re.split(r"(?<=[.!?])\s+", model_text) if s.strip().endswith("?")]
+    if questions:
+        lines.append("")
+        lines += questions[:2]
+    return "\n".join(lines)
+
+
 def handle_conversation(tg: Telegram, repo: Repository, profile: Profile, chat_id: int, text: str,
                         source: str = "text", reply_to: int | None = None,
                         image: tuple[bytes, str] | None = None) -> None:
@@ -116,7 +152,10 @@ def handle_conversation(tg: Telegram, repo: Repository, profile: Profile, chat_i
         tg.send(chat_id, note, keyboard=undo, reply_to=reply_to)
     if result.import_id:
         keyboard = None  # el botón de deshacer va en el detalle de la importación
-    result.text = drop_unbacked_amounts(result.text, result.notes)
+    result.text = drop_unbacked_amounts(tidy_reply(result.text, profile.currency), result.notes)
+    if result.recorded and not result.import_id:
+        # La confirmación de lo registrado la arma el código (formato fijo); del modelo solo queda una pregunta.
+        result.text = confirmation_text(profile, result.recorded, result.text)
     tg.send(chat_id, result.text, keyboard=keyboard, reply_to=None if result.notes else reply_to)
     send_alerts(tg, chat_id, result.alerts)
     repo.add_message(profile.user_id, "user", f"[pantallazo] {text}" if image else text)
