@@ -14,8 +14,11 @@ Parameters:
   LlmProvider:
     Type: String
     Default: bedrock
-    AllowedValues: [bedrock, anthropic]
-    Description: bedrock = Claude en Amazon Bedrock; anthropic = API de Anthropic (API key en AnthropicKeyParam).
+    AllowedValues: [bedrock, anthropic, nova]
+    Description: bedrock = Claude en Amazon Bedrock; anthropic = API de Anthropic (API key en AnthropicKeyParam); nova = Amazon Nova en Bedrock.
+  NovaModelId:
+    Type: String
+    Default: amazon.nova-lite-v1:0
   AnthropicKeyParam:
     Type: String
     Default: /cuentas-bot/anthropic-api-key
@@ -229,6 +232,7 @@ Resources:
           WEBAPP_URL: !Sub https://${WebDistribution.DomainName}/
           MODEL_ID: !Ref ModelId
           LLM_PROVIDER: !Ref LlmProvider
+          NOVA_MODEL_ID: !Ref NovaModelId
           ANTHROPIC_KEY_PARAM: !Ref AnthropicKeyParam
           FALLBACK_MODEL_ID: !Ref FallbackModelId
           BEDROCK_REGION: !Ref BedrockRegion
@@ -254,6 +258,11 @@ Resources:
             - Effect: Allow
               Action: bedrock-mantle:CreateInference
               Resource: "*"
+            - Effect: Allow
+              Action: bedrock:InvokeModel
+              Resource:
+                - arn:aws:bedrock:*::foundation-model/amazon.nova-*
+                - !Sub arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*
         - Statement:
             - Effect: Allow
               Action: transcribe:StartTranscriptionJob
@@ -278,6 +287,7 @@ Resources:
           WEBAPP_URL: !Sub https://${WebDistribution.DomainName}/
           MODEL_ID: !Ref ModelId
           LLM_PROVIDER: !Ref LlmProvider
+          NOVA_MODEL_ID: !Ref NovaModelId
           ANTHROPIC_KEY_PARAM: !Ref AnthropicKeyParam
           FALLBACK_MODEL_ID: !Ref FallbackModelId
           BEDROCK_REGION: !Ref BedrockRegion
@@ -303,6 +313,11 @@ Resources:
             - Effect: Allow
               Action: bedrock-mantle:CreateInference
               Resource: "*"
+            - Effect: Allow
+              Action: bedrock:InvokeModel
+              Resource:
+                - arn:aws:bedrock:*::foundation-model/amazon.nova-*
+                - !Sub arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*
         - Statement:
             - Effect: Allow
               Action: transcribe:DeleteTranscriptionJob
@@ -330,6 +345,7 @@ Resources:
           WEBAPP_URL: !Sub https://${WebDistribution.DomainName}/
           MODEL_ID: !Ref ModelId
           LLM_PROVIDER: !Ref LlmProvider
+          NOVA_MODEL_ID: !Ref NovaModelId
           ANTHROPIC_KEY_PARAM: !Ref AnthropicKeyParam
           FALLBACK_MODEL_ID: !Ref FallbackModelId
           BEDROCK_REGION: !Ref BedrockRegion

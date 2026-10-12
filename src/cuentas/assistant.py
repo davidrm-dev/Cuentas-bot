@@ -8,9 +8,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import anthropic
+from botocore.exceptions import BotoCoreError, ClientError
 from anthropic import Anthropic, AnthropicBedrockMantle, BetaFallbackState, BetaRefusalFallbackMiddleware
 
-from . import categories, config, learning, parsing
+from . import categories, config, converse, learning, parsing
 from .finance import Alert, fmt
 from .ledger import Ledger
 from .models import Transaction
@@ -97,9 +98,13 @@ def reply(ledger: Ledger, user_text: str, source: str = "text",
     }]
     tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
     try:
-        with BetaFallbackState():
-            text = _loop(messages, executor, tokens)
-    except (anthropic.APIConnectionError, anthropic.APIStatusError) as exc:
+        if config.LLM_PROVIDER == "nova":
+            text = converse.loop(SYSTEM_PROMPT, messages[0]["content"][0]["text"], user_text, executor,
+                                 tokens, MAX_STEPS)
+        else:
+            with BetaFallbackState():
+                text = _loop(messages, executor, tokens)
+    except (anthropic.APIConnectionError, anthropic.APIStatusError, BotoCoreError, ClientError) as exc:
         log.exception("Fallo llamando al modelo: %s", exc)
         text = _offline_reply(ledger, executor, user_text)
     return AssistantResult(text=text, alerts=executor.alerts, recorded=executor.recorded, tokens=tokens)

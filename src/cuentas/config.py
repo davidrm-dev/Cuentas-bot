@@ -12,8 +12,10 @@ WEBHOOK_SECRET_PARAM = os.environ.get("WEBHOOK_SECRET_PARAM", "/cuentas-bot/webh
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "")
 
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
-# "bedrock" (Claude en Amazon Bedrock, se paga en la factura de AWS) o "anthropic" (API de Anthropic con API key).
+# "bedrock" (Claude en Amazon Bedrock), "anthropic" (API de Anthropic con API key)
+# o "nova" (Amazon Nova en Bedrock vía Converse; no requiere aprobación de Anthropic).
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "bedrock").lower()
+NOVA_MODEL_ID = os.environ.get("NOVA_MODEL_ID", "amazon.nova-lite-v1:0")
 ANTHROPIC_KEY_PARAM = os.environ.get("ANTHROPIC_KEY_PARAM", "/cuentas-bot/anthropic-api-key")
 BEDROCK_REGION = os.environ.get("BEDROCK_REGION", AWS_REGION)
 # Haiku 5.5 por costo: ~40 veces más barato que Opus y suficiente para registrar y clasificar gastos.
@@ -22,8 +24,9 @@ FALLBACK_MODEL_ID = os.environ.get("FALLBACK_MODEL_ID", "anthropic.claude-sonnet
 LLM_EFFORT = os.environ.get("LLM_EFFORT", "low")
 LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "1500"))
 # Precios por millón de tokens, solo para estimar el consumo en /consumo (revisa la tarifa de Bedrock).
-PRICE_INPUT_MTOK = float(os.environ.get("PRICE_INPUT_MTOK", "0.10"))
-PRICE_OUTPUT_MTOK = float(os.environ.get("PRICE_OUTPUT_MTOK", "0.50"))
+_NOVA = LLM_PROVIDER == "nova"  # Nova Lite: 0,06 / 0,24 USD por millón de tokens
+PRICE_INPUT_MTOK = float(os.environ.get("PRICE_INPUT_MTOK", "0.06" if _NOVA else "0.10"))
+PRICE_OUTPUT_MTOK = float(os.environ.get("PRICE_OUTPUT_MTOK", "0.24" if _NOVA else "0.50"))
 PRICE_TRANSCRIBE_MIN = float(os.environ.get("PRICE_TRANSCRIBE_MIN", "0.024"))
 
 # Control de gasto
