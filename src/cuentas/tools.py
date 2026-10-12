@@ -284,9 +284,10 @@ class ToolExecutor:
 
     def _t_actualizar_perfil(self, args: dict[str, Any]) -> dict[str, Any]:
         p = self.ledger.profile
-        if args.get("ingreso_mensual") is not None:
+        # Un 0 o un valor vacío significa "no lo dijo": no se toca ese dato.
+        if args.get("ingreso_mensual"):
             p.monthly_income = self._amount(args["ingreso_mensual"])
-        if args.get("dia_de_pago") is not None:
+        if args.get("dia_de_pago"):
             day = int(args["dia_de_pago"])
             if not 1 <= day <= 31:
                 raise ToolInputError("Día de pago inválido")

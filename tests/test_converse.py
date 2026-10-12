@@ -43,3 +43,29 @@ def test_nova_error_falls_back_to_parser(monkeypatch, repo, profile, now):
     monkeypatch.setattr(converse, "_client", lambda: Denied())
     result = assistant.reply(Ledger(repo, profile, now), "gasté 8000 en taxi")
     assert "Gasto registrado" in result.text
+
+
+def test_nova_loop_guard_asks_for_final_answer(monkeypatch, repo, profile, now):
+    class Looper:
+        calls = []
+
+        def converse(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"stopReason": "tool_use", "usage": {}, "output": {"message": {"role": "assistant", "content": [
+                {"toolUse": {"toolUseId": f"t{len(self.calls)}", "name": "listar_suscripciones", "input": {}}}]}}}
+
+    looper = Looper()
+    monkeypatch.setattr(config, "LLM_PROVIDER", "nova")
+    monkeypatch.setattr(converse, "_client", lambda: looper)
+    assistant.reply(Ledger(repo, profile, now), "¿qué suscripciones tengo?")
+    texts = [b.get("text", "") for m in looper.calls[-1]["messages"] if m["role"] == "user" for b in m["content"]]
+    assert any("sin usar más herramientas" in t for t in texts)
+
+
+def test_profile_tool_ignores_zero_income(repo, profile, now):
+    import json
+
+    from cuentas.tools import ToolExecutor
+
+    out = json.loads(ToolExecutor(Ledger(repo, profile, now)).run("actualizar_perfil", {"ingreso_mensual": 0}))
+    assert out["perfil"]["ingreso_mensual"] is None

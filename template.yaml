@@ -18,7 +18,8 @@ Parameters:
     Description: bedrock = Claude en Amazon Bedrock; anthropic = API de Anthropic (API key en AnthropicKeyParam); nova = Amazon Nova en Bedrock.
   NovaModelId:
     Type: String
-    Default: amazon.nova-lite-v1:0
+    Default: amazon.nova-pro-v1:0
+    Description: Nova Pro usa bien las herramientas. Nova Lite es más barato pero en pruebas inventó movimientos.
   AnthropicKeyParam:
     Type: String
     Default: /cuentas-bot/anthropic-api-key
