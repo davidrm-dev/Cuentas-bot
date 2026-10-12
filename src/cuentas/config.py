@@ -39,7 +39,7 @@ DAILY_LLM_LIMIT = int(os.environ.get("DAILY_LLM_LIMIT", "80"))
 # Registrar frases simples ("gasté 12 mil en uber") sin llamar al modelo.
 FAST_PATH = os.environ.get("FAST_PATH", "true").lower() in ("1", "true", "yes")
 
-DEFAULT_CURRENCY = os.environ.get("DEFAULT_CURRENCY", "USD")
+DEFAULT_CURRENCY = os.environ.get("DEFAULT_CURRENCY", "COP")
 DEFAULT_TIMEZONE = os.environ.get("DEFAULT_TIMEZONE", "America/Bogota")
 TRANSCRIBE_LANGUAGE = os.environ.get("TRANSCRIBE_LANGUAGE", "es-US")
 

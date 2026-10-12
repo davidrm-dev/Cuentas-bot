@@ -41,7 +41,7 @@ Parameters:
     AllowedValues: [low, medium, high]
   DefaultCurrency:
     Type: String
-    Default: USD
+    Default: COP
   DefaultTimezone:
     Type: String
     Default: America/Bogota
