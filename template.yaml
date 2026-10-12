@@ -1,0 +1,384 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Cuentas - contador personal en Telegram (voz y texto) con dashboard en Mini App
+
+Parameters:
+  TelegramTokenParam:
+    Type: String
+    Default: /cuentas-bot/telegram-token
+    Description: Nombre del parámetro SSM (SecureString) con el token de @BotFather
+  WebhookSecretParam:
+    Type: String
+    Default: /cuentas-bot/webhook-secret
+    Description: Nombre del parámetro SSM (SecureString) con el secreto del webhook
+  ModelId:
+    Type: String
+    Default: anthropic.claude-opus-5-5
+  FallbackModelId:
+    Type: String
+    Default: anthropic.claude-opus-4-8
+  BedrockRegion:
+    Type: String
+    Default: us-east-1
+  LlmEffort:
+    Type: String
+    Default: medium
+    AllowedValues: [low, medium, high]
+  DefaultCurrency:
+    Type: String
+    Default: USD
+  DefaultTimezone:
+    Type: String
+    Default: America/Bogota
+  TranscribeLanguage:
+    Type: String
+    Default: es-US
+    AllowedValues: [es-US, es-ES]
+  DailyScheduleUtc:
+    Type: String
+    Default: cron(0 12 * * ? *)
+    Description: Hora de la tarea diaria (UTC). 12:00 UTC = 7:00 en Bogotá/Lima.
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [arm64]
+    MemorySize: 512
+    Timeout: 30
+    CodeUri: src/
+    Tracing: Active
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref Table
+        BOT_TOKEN_PARAM: !Ref TelegramTokenParam
+        WEBHOOK_SECRET_PARAM: !Ref WebhookSecretParam
+        DEFAULT_CURRENCY: !Ref DefaultCurrency
+        DEFAULT_TIMEZONE: !Ref DefaultTimezone
+
+Resources:
+  # ---------------------------------------------------------------- datos
+  Table:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: PK, AttributeType: S }
+        - { AttributeName: SK, AttributeType: S }
+        - { AttributeName: GSI1PK, AttributeType: S }
+        - { AttributeName: GSI1SK, AttributeType: S }
+      KeySchema:
+        - { AttributeName: PK, KeyType: HASH }
+        - { AttributeName: SK, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - { AttributeName: GSI1PK, KeyType: HASH }
+            - { AttributeName: GSI1SK, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      TimeToLiveSpecification: { AttributeName: ttl, Enabled: true }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+      SSESpecification: { SSEEnabled: true }
+
+  AudioBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: borrar-audios
+            Status: Enabled
+            ExpirationInDays: 1
+
+  UpdatesDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      FifoQueue: true
+      MessageRetentionPeriod: 1209600
+
+  UpdatesQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      FifoQueue: true
+      VisibilityTimeout: 720
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt UpdatesDLQ.Arn
+        maxReceiveCount: 2
+
+  # ---------------------------------------------------------------- API
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 50
+        ThrottlingRateLimit: 20
+
+  WebhookFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: cuentas.handlers.webhook.handler
+      MemorySize: 256
+      Timeout: 10
+      Environment:
+        Variables:
+          UPDATES_QUEUE_URL: !Ref UpdatesQueue
+      Policies:
+        - SQSSendMessagePolicy: { QueueName: !GetAtt UpdatesQueue.QueueName }
+        - Statement:
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${WebhookSecretParam}
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+      Events:
+        Webhook:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: POST
+            Path: /telegram/webhook
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: cuentas.handlers.api.handler
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref Table }
+        - Statement:
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TelegramTokenParam}
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+      Events:
+        Dashboard:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Method: GET, Path: /api/dashboard }
+        PatchTx:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Method: PATCH, Path: "/api/transactions/{id}" }
+        DeleteTx:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Method: DELETE, Path: "/api/transactions/{id}" }
+        PutBudget:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Method: PUT, Path: "/api/budgets/{category}" }
+        PutProfile:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Method: PUT, Path: /api/profile }
+
+  # ---------------------------------------------------------------- procesamiento
+  ProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: cuentas.handlers.processor.handler
+      Timeout: 120
+      MemorySize: 1024
+      Environment:
+        Variables:
+          AUDIO_BUCKET: !Ref AudioBucket
+          WEBAPP_URL: !Sub https://${WebDistribution.DomainName}/
+          MODEL_ID: !Ref ModelId
+          FALLBACK_MODEL_ID: !Ref FallbackModelId
+          BEDROCK_REGION: !Ref BedrockRegion
+          LLM_EFFORT: !Ref LlmEffort
+          TRANSCRIBE_LANGUAGE: !Ref TranscribeLanguage
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref Table }
+        - S3CrudPolicy: { BucketName: !Ref AudioBucket }
+        - Statement:
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TelegramTokenParam}
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+        - Statement:
+            - Effect: Allow
+              Action: bedrock-mantle:CreateInference
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action: transcribe:StartTranscriptionJob
+              Resource: "*"
+      Events:
+        Updates:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt UpdatesQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes: [ReportBatchItemFailures]
+
+  TranscribeDoneFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: cuentas.handlers.transcribe_done.handler
+      Timeout: 120
+      MemorySize: 1024
+      Environment:
+        Variables:
+          AUDIO_BUCKET: !Ref AudioBucket
+          WEBAPP_URL: !Sub https://${WebDistribution.DomainName}/
+          MODEL_ID: !Ref ModelId
+          FALLBACK_MODEL_ID: !Ref FallbackModelId
+          BEDROCK_REGION: !Ref BedrockRegion
+          LLM_EFFORT: !Ref LlmEffort
+          TRANSCRIBE_LANGUAGE: !Ref TranscribeLanguage
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref Table }
+        - S3CrudPolicy: { BucketName: !Ref AudioBucket }
+        - Statement:
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TelegramTokenParam}
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+        - Statement:
+            - Effect: Allow
+              Action: bedrock-mantle:CreateInference
+              Resource: "*"
+        - Statement:
+            - Effect: Allow
+              Action: transcribe:DeleteTranscriptionJob
+              Resource: "*"
+      Events:
+        JobDone:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source: [aws.transcribe]
+              detail-type: [Transcribe Job State Change]
+              detail:
+                TranscriptionJobStatus: [COMPLETED, FAILED]
+                TranscriptionJobName: [{ prefix: cuentas_ }]
+
+  SchedulerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: cuentas.handlers.scheduler.handler
+      Timeout: 900
+      Environment:
+        Variables:
+          AUDIO_BUCKET: !Ref AudioBucket
+          WEBAPP_URL: !Sub https://${WebDistribution.DomainName}/
+          MODEL_ID: !Ref ModelId
+          FALLBACK_MODEL_ID: !Ref FallbackModelId
+          BEDROCK_REGION: !Ref BedrockRegion
+          LLM_EFFORT: !Ref LlmEffort
+          TRANSCRIBE_LANGUAGE: !Ref TranscribeLanguage
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref Table }
+        - Statement:
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TelegramTokenParam}
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+      Events:
+        Daily:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: !Ref DailyScheduleUtc
+            RetryPolicy: { MaximumRetryAttempts: 0 }
+
+  # ---------------------------------------------------------------- Mini App
+  WebBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  WebBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: { Service: cloudfront.amazonaws.com }
+            Action: s3:GetObject
+            Resource: !Sub ${WebBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${WebDistribution}
+
+  WebOac:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${AWS::StackName}-web
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  WebDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: Cuentas bot - Mini App
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: web
+            DomainName: !GetAtt WebBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt WebOac.Id
+            S3OriginConfig: { OriginAccessIdentity: "" }
+          - Id: api
+            DomainName: !Sub ${HttpApi}.execute-api.${AWS::Region}.amazonaws.com
+            CustomOriginConfig: { OriginProtocolPolicy: https-only }
+        DefaultCacheBehavior:
+          TargetOriginId: web
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # Managed-CachingOptimized
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: api
+            ViewerProtocolPolicy: https-only
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # Managed-CachingDisabled
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac # Managed-AllViewerExceptHostHeader
+
+Outputs:
+  WebhookUrl:
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/telegram/webhook
+  WebAppUrl:
+    Value: !Sub https://${WebDistribution.DomainName}/
+  WebBucketName:
+    Value: !Ref WebBucket
+  DistributionId:
+    Value: !Ref WebDistribution
+  TableName:
+    Value: !Ref Table

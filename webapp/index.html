@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Cuentas</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="viz-root" id="app">
+    <header class="top">
+      <button class="icon-btn" id="prev" aria-label="Mes anterior">‹</button>
+      <h1 id="month-title">…</h1>
+      <button class="icon-btn" id="next" aria-label="Mes siguiente">›</button>
+    </header>
+
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-tab="resumen" aria-selected="true">Resumen</button>
+      <button role="tab" data-tab="movimientos">Movimientos</button>
+      <button role="tab" data-tab="suscripciones">Fijos</button>
+      <button role="tab" data-tab="perfil">Ajustes</button>
+    </nav>
+
+    <main>
+      <p class="status" id="status" role="status">Cargando…</p>
+
+      <section data-panel="resumen" hidden>
+        <div class="tiles" id="tiles"></div>
+        <div class="card" id="budgets-card" hidden>
+          <h2>Presupuestos</h2>
+          <ul class="budgets" id="budgets"></ul>
+        </div>
+        <div class="card">
+          <h2>Gasto acumulado del mes</h2>
+          <p class="sub" id="daily-sub"></p>
+          <div class="chart" id="daily-chart"></div>
+        </div>
+        <div class="card">
+          <h2>Por categoría</h2>
+          <p class="sub">La marca vertical es tu promedio mensual aprendido.</p>
+          <div id="cat-chart"></div>
+        </div>
+        <div class="card">
+          <h2>Ingresos y gastos, últimos meses</h2>
+          <div class="legend" id="hist-legend"></div>
+          <div class="chart" id="hist-chart"></div>
+        </div>
+        <div class="card">
+          <h2>¿Qué días gastas más?</h2>
+          <p class="sub">Gastos variables de los últimos meses (sin suscripciones).</p>
+          <div class="chart" id="weekday-chart"></div>
+        </div>
+        <div class="card" id="insights-card" hidden>
+          <h2>Lo que he aprendido de ti</h2>
+          <ul class="insights" id="insights"></ul>
+        </div>
+      </section>
+
+      <section data-panel="movimientos" hidden>
+        <div class="filters">
+          <select id="cat-filter" aria-label="Filtrar por categoría"><option value="">Todas las categorías</option></select>
+        </div>
+        <div id="tx-list"></div>
+      </section>
+
+      <section data-panel="suscripciones" hidden>
+        <div class="card">
+          <h2>Pagos recurrentes</h2>
+          <p class="sub" id="subs-total"></p>
+          <ul class="rows" id="subs"></ul>
+          <p class="hint">Para agregar o cancelar, díselo al bot: <i>“pago Spotify 17 mil el 10 de cada mes”</i>.</p>
+        </div>
+      </section>
+
+      <section data-panel="perfil" hidden>
+        <form class="card form" id="profile-form">
+          <h2>Tu contexto económico</h2>
+          <label>Ingreso mensual <input type="number" inputmode="decimal" min="0" step="any" name="monthly_income"></label>
+          <label>Meta de ahorro (%) <input type="number" inputmode="numeric" min="0" max="90" name="savings_goal_pct"></label>
+          <label>Día de pago <input type="number" inputmode="numeric" min="1" max="31" name="payday"></label>
+          <button type="submit" class="primary">Guardar</button>
+        </form>
+        <form class="card form" id="budget-form">
+          <h2>Presupuesto por categoría</h2>
+          <label>Categoría <select name="category" id="budget-cat"></select></label>
+          <label>Tope mensual (0 para quitarlo) <input type="number" inputmode="decimal" min="0" step="any" name="amount" required></label>
+          <button type="submit" class="primary">Guardar presupuesto</button>
+        </form>
+      </section>
+    </main>
+
+    <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+
+    <dialog id="tx-dialog">
+      <form method="dialog" class="sheet">
+        <h2 id="dlg-title"></h2>
+        <p class="sub" id="dlg-sub"></p>
+        <label>Categoría <select id="dlg-cat"></select></label>
+        <div class="actions">
+          <button value="delete" class="danger" id="dlg-delete">Eliminar</button>
+          <button value="cancel">Cancelar</button>
+          <button value="save" class="primary" id="dlg-save">Guardar</button>
+        </div>
+      </form>
+    </dialog>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

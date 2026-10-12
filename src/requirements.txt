@@ -1,0 +1,2 @@
+anthropic[bedrock]>=1.13,<2
+tzdata>=2024.1
