@@ -17,6 +17,8 @@ from .tools import TOOLS, ToolExecutor, ToolInputError
 log = logging.getLogger(__name__)
 _THINKING = re.compile(r"<thinking>.*?</thinking>", re.S)
 _BOLD = re.compile(r"\*\*(.+?)\*\*")
+# "700,000 COP" / "$700,000.50 COP" -> "$700.000 COP" (formato colombiano, como el resto del bot)
+_MONEY = re.compile(r"(?:\$\s?)?(\d{1,3}(?:,\d{3})+)(?:\.\d{1,2})?(\s?[A-Z]{3}\b)")
 
 NOVA_STYLE = """
 
@@ -40,8 +42,9 @@ def tool_config() -> dict[str, Any]:
 
 
 def clean_text(text: str) -> str:
-    """Quita bloques de razonamiento y convierte **negritas** a HTML."""
-    return _BOLD.sub(r"<b>\1</b>", _THINKING.sub("", text)).strip()
+    """Quita bloques de razonamiento, convierte **negritas** a HTML y normaliza montos."""
+    text = _BOLD.sub(r"<b>\1</b>", _THINKING.sub("", text))
+    return _MONEY.sub(lambda m: f"${m.group(1).replace(',', '.')}{m.group(2)}", text).strip()
 
 
 def loop(system_prompt: str, context: str, user_text: str, executor: ToolExecutor,

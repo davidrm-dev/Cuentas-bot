@@ -36,6 +36,11 @@ próxima fecha de cobro calculada desde hoy. Si además ya pagó este mes, regis
 - Para preguntas como "¿debería salir hoy?" o "¿me alcanza para...?" usa `evaluar_salida_o_compra` y responde con \
 un veredicto claro (sí / con cuidado / no) apoyado en los números que devuelve: disponible, presupuesto diario, \
 días que faltan. Ten en cuenta sus patrones y su meta de ahorro; propone una alternativa concreta si la respuesta es no.
+- Consejos y planes: si el usuario cuenta un plan (eventos a los que debe ir, un imprevisto, pedir prestado a \
+alguien) usa `planificar_mes` con cada gasto planeado como evento. Si `estado` es "faltan_datos", pregunta \
+exactamente lo que falta. El desglose con las cifras se le envía al usuario automáticamente: tú responde en 2 a \
+4 líneas con un veredicto y consejos prácticos (cómo abaratar un evento, qué recortar, cómo devolver el préstamo). \
+Sé honesto, sin sermones, y no escribas cifras que la herramienta no haya dado.
 - Para consultas de gastos usa `consultar_gastos` con fechas exactas. Nunca inventes cifras: todo número sale \
 de una herramienta o del contexto.
 - Si el usuario te da datos de su situación (sueldo, día de cobro, moneda, meta de ahorro), guárdalos con \
@@ -58,6 +63,7 @@ class AssistantResult:
     alerts: list[Alert] = field(default_factory=list)
     recorded: list[Transaction] = field(default_factory=list)
     tokens: dict[str, int] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
 
 
 @lru_cache(maxsize=1)
@@ -107,7 +113,8 @@ def reply(ledger: Ledger, user_text: str, source: str = "text",
     except (anthropic.APIConnectionError, anthropic.APIStatusError, BotoCoreError, ClientError) as exc:
         log.exception("Fallo llamando al modelo: %s", exc)
         text = _offline_reply(ledger, executor, user_text)
-    return AssistantResult(text=text, alerts=executor.alerts, recorded=executor.recorded, tokens=tokens)
+    return AssistantResult(text=text, alerts=executor.alerts, recorded=executor.recorded, tokens=tokens,
+                           notes=executor.notes)
 
 
 def _add_usage(tokens: dict[str, int], usage: Any) -> None:

@@ -8,7 +8,7 @@ import calendar
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
@@ -257,6 +257,161 @@ def _days_until_payday(today: date, payday: int) -> int:
         nxt = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
         target = nxt.replace(day=min(payday, calendar.monthrange(nxt.year, nxt.month)[1]))
     return (target - today).days
+
+
+# ---------------------------------------------------------------------------
+# Planificación: "¿cuánto debo pedir prestado para llegar a fin de mes?"
+# ---------------------------------------------------------------------------
+
+# Gastos que no son del día a día (se cuentan aparte o ya están pagados).
+FIXED_CATEGORIES = ("vivienda", "servicios", "deudas", "suscripciones", "ahorro")
+
+
+def nice_ceil(value: Decimal) -> Decimal:
+    """Redondea hacia arriba a 2 cifras significativas: 437.512 -> 440.000."""
+    if value <= 0:
+        return ZERO
+    step = Decimal(10) ** max(0, len(str(int(value))) - 2)
+    return (value / step).to_integral_value(rounding=ROUND_CEILING) * step
+
+
+def charges_between(subs: Iterable[Subscription], start: date, end: date) -> Decimal:
+    total = ZERO
+    for s in subs:
+        if not s.active:
+            continue
+        charge = date.fromisoformat(s.next_charge)
+        while start <= charge <= end:
+            total += s.amount
+            if s.cycle != "weekly":
+                break
+            charge += timedelta(days=7)
+    return total
+
+
+def daily_variable_rate(profile: Profile, month_txs: list[Transaction], today: date) -> tuple[Decimal | None, Decimal, str]:
+    """Gasto diario habitual (sin fijos) y su parte discrecional, según lo aprendido o el mes en curso."""
+    monthly = profile.stats.get("monthly_avg") or {}
+    if profile.stats.get("months_observed", 0) >= 1 and monthly:
+        var = {c: Decimal(str(v)) for c, v in monthly.items() if c not in FIXED_CATEGORIES}
+        disc = sum((v for c, v in var.items() if categories.default_necessity(c) == "discrecional"), ZERO)
+        return money(sum(var.values(), ZERO) / 30), money(disc / 30), "historial de meses anteriores"
+    var_tx = [t for t in month_txs if t.kind == "expense" and t.source != "subscription"
+              and t.category not in FIXED_CATEGORIES]
+    if today.day >= 5 and var_tx:
+        disc = sum((t.amount for t in var_tx if t.necessity == "discrecional"), ZERO)
+        return money(sum((t.amount for t in var_tx), ZERO) / today.day), money(disc / today.day), "lo que va del mes"
+    return None, ZERO, "desconocido"
+
+
+def plan_month(profile: Profile, month_txs: list[Transaction], subs: list[Subscription], today: date,
+               events: list[dict[str, Any]], cash_now: Decimal | None = None,
+               daily_estimate: Decimal | None = None, buffer_pct: Decimal = Decimal("10")) -> dict[str, Any]:
+    """Cuánto dinero falta (y cuánto pedir prestado) para cubrir el día a día y los eventos hasta el próximo pago."""
+    _, month_end = month_bounds(today)
+    if profile.payday:
+        days_to_pay = _days_until_payday(today, profile.payday)
+        end = today + timedelta(days=days_to_pay - 1) if days_to_pay > 0 else month_end
+        horizon = "hasta el día antes de tu próximo pago"
+    else:
+        end, horizon = month_end, "hasta fin de mes"
+    days = (end - today).days + 1
+
+    rate, disc_rate, rate_source = daily_variable_rate(profile, month_txs, today)
+    if daily_estimate is not None:
+        rate, disc_rate, rate_source = daily_estimate, money(daily_estimate * Decimal("0.4")), "estimado por el usuario"
+
+    t = totals(month_txs)
+    if cash_now is not None:
+        available, available_source = cash_now, "saldo que indicó el usuario"
+    else:
+        income = t["income"] if t["income"] > 0 else reference_income(profile)
+        available = money(income - t["expense"]) if income is not None else None
+        available_source = "ingresos del mes menos gastos registrados"
+
+    missing = []
+    if rate is None:
+        missing.append("gasto_diario_estimado (cuánto gasta normalmente al día en comida, transporte, etc.)")
+    if available is None:
+        missing.append("saldo_actual (cuánto dinero tiene hoy) o su ingreso mensual")
+    if missing:
+        return {"estado": "faltan_datos", "faltan": missing, "dias_hasta": end.isoformat()}
+
+    in_range, later = [], []
+    for e in events:
+        when = date.fromisoformat(e["fecha"]) if e.get("fecha") else None
+        (later if when and when > end else in_range).append(e)
+    events_total = sum((money(e["monto"]) for e in in_range), ZERO)
+    fixed_pending = charges_between(subs, today, end)
+    living = money(rate * days)
+    needed = living + fixed_pending + events_total
+    buffer = money(needed * buffer_pct / 100)
+    shortfall = needed + buffer - available
+    loan = nice_ceil(shortfall)
+
+    austere_rate = rate - disc_rate / 2  # recortando a la mitad lo no esencial
+    austere_short = money(austere_rate * days) + fixed_pending + events_total + buffer - available
+    result: dict[str, Any] = {
+        "estado": "ok",
+        "moneda": profile.currency,
+        "horizonte": horizon,
+        "hasta": end.isoformat(),
+        "dias": days,
+        "disponible": float(available),
+        "disponible_fuente": available_source,
+        "gasto_diario": float(rate),
+        "gasto_diario_fuente": rate_source,
+        "gasto_dia_a_dia": float(living),
+        "cobros_fijos_pendientes": float(fixed_pending),
+        "eventos": [{"descripcion": e.get("descripcion", ""), "monto": float(money(e["monto"])),
+                     "fecha": e.get("fecha")} for e in in_range],
+        "total_eventos": float(events_total),
+        "colchon": float(buffer),
+        "colchon_pct": float(buffer_pct),
+        "necesita": float(needed + buffer),
+        "faltante_exacto": float(max(shortfall, ZERO)),
+        "monto_a_pedir": float(loan),
+        "monto_a_pedir_austero": float(nice_ceil(austere_short)),
+        "ahorro_si_recorta_no_esenciales": float(max(loan - nice_ceil(austere_short), ZERO)),
+        "sobrante_si_no_pide": float(max(-shortfall, ZERO)),
+    }
+    if later:
+        result["eventos_despues_del_pago"] = [e.get("descripcion", "") for e in later]
+    income = reference_income(profile)
+    if income and loan > 0:
+        result["prestamo_vs_ingreso_pct"] = round(float(loan / income * 100), 1)
+        installment = nice_ceil(income * Decimal("0.10"))
+        result["cuota_sugerida_10pct_ingreso"] = float(installment)
+        result["meses_para_devolver"] = int((loan / installment).to_integral_value(rounding=ROUND_CEILING))
+    return result
+
+
+def plan_text(plan: dict[str, Any]) -> str:
+    """Desglose del plan con formato local, armado por código para que ninguna cifra la redacte el modelo."""
+    cur = plan["moneda"]
+    m = lambda v: fmt(Decimal(str(v)), cur)  # noqa: E731
+    lines = [f"🧮 <b>Plan {plan['horizonte']}</b> ({plan['dias']} días, hasta el {plan['hasta'][8:]}/{plan['hasta'][5:7]})",
+             f"• Día a día: {plan['dias']} × {m(plan['gasto_diario'])} = {m(plan['gasto_dia_a_dia'])}"]
+    for e in plan["eventos"]:
+        when = f" ({e['fecha'][8:]}/{e['fecha'][5:7]})" if e.get("fecha") else ""
+        lines.append(f"• {e['descripcion']}{when}: {m(e['monto'])}")
+    if plan["cobros_fijos_pendientes"]:
+        lines.append(f"• Cobros fijos pendientes: {m(plan['cobros_fijos_pendientes'])}")
+    lines += [f"• Colchón {plan['colchon_pct']:.0f}%: {m(plan['colchon'])}",
+              f"<b>Necesitas: {m(plan['necesita'])}</b> · tienes: {m(plan['disponible'])}", ""]
+    if plan["monto_a_pedir"] > 0:
+        lines.append(f"👉 <b>Pide {m(plan['monto_a_pedir'])}</b>")
+        if plan["ahorro_si_recorta_no_esenciales"] > 0:
+            lines.append(f"Si recortas a la mitad lo no esencial: {m(plan['monto_a_pedir_austero'])}")
+        if plan.get("meses_para_devolver"):
+            lines.append(f"Devolución sugerida: {plan['meses_para_devolver']} cuota(s) de hasta "
+                         f"{m(plan['cuota_sugerida_10pct_ingreso'])} (10% de tu ingreso)")
+    else:
+        lines.append(f"✅ No necesitas pedir prestado; te sobrarían ~{m(plan['sobrante_si_no_pide'])}")
+    if plan.get("eventos_despues_del_pago"):
+        lines.append("Después de tu pago (no incluidos): " + ", ".join(plan["eventos_despues_del_pago"]))
+    lines.append(f"<i>Gasto diario según {plan['gasto_diario_fuente']}; disponible según {plan['disponible_fuente']}.</i>")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

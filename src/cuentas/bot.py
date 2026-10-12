@@ -22,6 +22,7 @@ HELP = (
     "• <i>Tengo Netflix de 45 mil el 5 de cada mes</i>\n"
     "• <i>¿Cuánto llevo en restaurantes este mes?</i>\n"
     "• <i>¿Debería salir hoy?</i>\n"
+    "• <i>Me voy a pasar este mes: tengo un concierto de 250 mil y una boda. ¿Cuánto le pido a mis papás?</i>\n"
     "• <i>Ponme un tope de 400 mil en ocio</i>\n\n"
     "Comandos: /resumen /suscripciones /dashboard /deshacer /consumo /ayuda"
 )
@@ -80,7 +81,9 @@ def handle_conversation(tg: Telegram, repo: Repository, profile: Profile, chat_i
         usage.add_llm(profile.stats, ledger.today, result.tokens)
     repo.save_profile(profile)
     keyboard = tx_keyboard(result.recorded[-1]) if len(result.recorded) == 1 else None
-    tg.send(chat_id, result.text, keyboard=keyboard, reply_to=reply_to)
+    for note in result.notes:
+        tg.send(chat_id, note, reply_to=reply_to)
+    tg.send(chat_id, result.text, keyboard=keyboard, reply_to=None if result.notes else reply_to)
     send_alerts(tg, chat_id, result.alerts)
     repo.add_message(profile.user_id, "user", text)
     repo.add_message(profile.user_id, "assistant", result.text)

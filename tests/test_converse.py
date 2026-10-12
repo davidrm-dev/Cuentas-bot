@@ -69,3 +69,9 @@ def test_profile_tool_ignores_zero_income(repo, profile, now):
 
     out = json.loads(ToolExecutor(Ledger(repo, profile, now)).run("actualizar_perfil", {"ingreso_mensual": 0}))
     assert out["perfil"]["ingreso_mensual"] is None
+
+
+def test_clean_text_formats_money():
+    assert converse.clean_text("pide <b>700,000 COP</b> o 580,000.00 COP") == "pide <b>$700.000 COP</b> o $580.000 COP"
+    assert converse.clean_text("son 2,500,000 COP") == "son $2.500.000 COP"
+    assert converse.clean_text("hoy, 25 de octubre") == "hoy, 25 de octubre"

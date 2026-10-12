@@ -113,6 +113,39 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "planificar_mes",
+        "description": (
+            "Calcula cuánto dinero le falta al usuario para llegar a su próximo pago (o a fin de mes) cubriendo su "
+            "gasto diario habitual, los cobros fijos pendientes y los eventos que planea, y cuánto debería pedir "
+            "prestado (con un colchón). Úsala cuando cuente un plan, eventos que no puede dejar de ir, imprevistos, "
+            "o pregunte cuánto pedir prestado o cómo sobrevivir el mes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "eventos": {
+                    "type": "array",
+                    "description": "Gastos planeados que el usuario mencionó (eventos, viajes, regalos, pagos pendientes)",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "descripcion": {"type": "string"},
+                            "monto": {"type": "number", "description": "Costo estimado total del evento"},
+                            "fecha": {**_DATE, "description": "Fecha del evento si la dijo (YYYY-MM-DD)"},
+                        },
+                        "required": ["descripcion", "monto"],
+                    },
+                },
+                "saldo_actual": {"type": "number", "description": "Dinero que el usuario dice tener hoy, si lo dijo"},
+                "gasto_diario_estimado": {"type": "number",
+                                          "description": "Solo si el usuario dijo cuánto gasta normalmente al día"},
+                "colchon_pct": {"type": "number", "minimum": 0, "maximum": 50,
+                                "description": "Margen para imprevistos en %, por defecto 10"},
+            },
+            "required": ["eventos"],
+        },
+    },
+    {
         "name": "actualizar_perfil",
         "description": "Guarda datos del contexto económico del usuario: ingreso mensual, día de pago, moneda, meta de ahorro o zona horaria.",
         "input_schema": {
@@ -151,6 +184,7 @@ class ToolExecutor:
     source: str = "text"
     alerts: list[Alert] = field(default_factory=list)
     recorded: list[Transaction] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)  # mensajes armados por código que el bot envía tal cual
 
     def run(self, name: str, args: dict[str, Any]) -> str:
         handler: Callable[[dict[str, Any]], Any] | None = getattr(self, f"_t_{name}", None)
@@ -281,6 +315,28 @@ class ToolExecutor:
         subs = self.ledger.repo.list_subscriptions(self.ledger.profile.user_id)
         return finance.affordability(self.ledger.profile, self.ledger.month_transactions(), subs,
                                      self.ledger.today, cost)
+
+    def _t_planificar_mes(self, args: dict[str, Any]) -> dict[str, Any]:
+        events = []
+        for e in args.get("eventos") or []:
+            event = {"descripcion": str(e.get("descripcion", ""))[:80], "monto": self._amount(e.get("monto"))}
+            if e.get("fecha"):
+                event["fecha"] = self._date(e["fecha"]).isoformat()
+            events.append(event)
+        cash = self._amount(args["saldo_actual"], allow_zero=True) if args.get("saldo_actual") is not None else None
+        daily = self._amount(args["gasto_diario_estimado"]) if args.get("gasto_diario_estimado") else None
+        buffer = Decimal(str(args.get("colchon_pct", 10) or 0))
+        if not 0 <= buffer <= 50:
+            raise ToolInputError("El colchón debe estar entre 0 y 50%")
+        subs = self.ledger.repo.list_subscriptions(self.ledger.profile.user_id)
+        plan = finance.plan_month(self.ledger.profile, self.ledger.month_transactions(), subs, self.ledger.today,
+                                  events, cash, daily, buffer)
+        if plan["estado"] == "ok":
+            self.notes.append(finance.plan_text(plan))
+            plan["nota"] = ("El desglose con todas las cifras ya se le envió al usuario. No repitas cifras ni "
+                            "inventes otras; da solo un veredicto corto y 1 a 3 consejos prácticos. Este cálculo "
+                            "NO reserva la meta de ahorro: no digas que la protege.")
+        return plan
 
     def _t_actualizar_perfil(self, args: dict[str, Any]) -> dict[str, Any]:
         p = self.ledger.profile
