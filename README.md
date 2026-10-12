@@ -58,6 +58,7 @@ template.yaml      infraestructura (AWS SAM)
 
 Requisitos: AWS CLI, [SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html), Python 3.12.
 
+0. Usa credenciales con permisos de despliegue. Si no quieres usar un administrador, crea un usuario IAM con la política [`deploy/iam-deploy-policy.json`](deploy/iam-deploy-policy.json), que solo permite tocar recursos `cuentas-bot*`.
 1. Crea el bot con [@BotFather](https://t.me/BotFather) y guarda el token.
 2. Habilita el acceso a Claude en Amazon Bedrock (consola de Bedrock → *Model access*) en la región que uses (`BedrockRegion`, por defecto `us-east-1`).
 3. Guarda los secretos en SSM:

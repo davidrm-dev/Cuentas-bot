@@ -1,0 +1,101 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CloudFormation",
+      "Effect": "Allow",
+      "Action": "cloudformation:*",
+      "Resource": [
+        "arn:aws:cloudformation:*:*:stack/cuentas-bot*/*",
+        "arn:aws:cloudformation:*:*:stack/aws-sam-cli-managed-default/*",
+        "arn:aws:cloudformation:*:aws:transform/Serverless-2016-10-31"
+      ]
+    },
+    {
+      "Sid": "CloudFormationRead",
+      "Effect": "Allow",
+      "Action": ["cloudformation:ValidateTemplate", "cloudformation:GetTemplateSummary", "cloudformation:ListStacks"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "Buckets",
+      "Effect": "Allow",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::cuentas-bot*",
+        "arn:aws:s3:::cuentas-bot*/*",
+        "arn:aws:s3:::aws-sam-cli-managed-default-*",
+        "arn:aws:s3:::aws-sam-cli-managed-default-*/*"
+      ]
+    },
+    {
+      "Sid": "Lambda",
+      "Effect": "Allow",
+      "Action": "lambda:*",
+      "Resource": [
+        "arn:aws:lambda:*:*:function:cuentas-bot*",
+        "arn:aws:lambda:*:*:event-source-mapping:*"
+      ]
+    },
+    {
+      "Sid": "LambdaEventSourceMappings",
+      "Effect": "Allow",
+      "Action": ["lambda:CreateEventSourceMapping", "lambda:GetEventSourceMapping", "lambda:ListEventSourceMappings"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "Roles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:UpdateRole", "iam:TagRole", "iam:UntagRole",
+        "iam:PassRole", "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies"
+      ],
+      "Resource": "arn:aws:iam::*:role/cuentas-bot*"
+    },
+    {
+      "Sid": "Data",
+      "Effect": "Allow",
+      "Action": ["dynamodb:*", "sqs:*"],
+      "Resource": [
+        "arn:aws:dynamodb:*:*:table/cuentas-bot*",
+        "arn:aws:sqs:*:*:cuentas-bot*"
+      ]
+    },
+    {
+      "Sid": "EventsAndSchedules",
+      "Effect": "Allow",
+      "Action": ["events:*", "scheduler:*", "logs:*"],
+      "Resource": [
+        "arn:aws:events:*:*:rule/cuentas-bot*",
+        "arn:aws:scheduler:*:*:schedule/default/*",
+        "arn:aws:logs:*:*:log-group:/aws/lambda/cuentas-bot*"
+      ]
+    },
+    {
+      "Sid": "ApiGatewayAndCloudFront",
+      "Effect": "Allow",
+      "Action": [
+        "apigateway:*",
+        "cloudfront:CreateDistribution", "cloudfront:UpdateDistribution", "cloudfront:DeleteDistribution",
+        "cloudfront:GetDistribution", "cloudfront:GetDistributionConfig", "cloudfront:TagResource",
+        "cloudfront:CreateInvalidation", "cloudfront:CreateOriginAccessControl",
+        "cloudfront:GetOriginAccessControl", "cloudfront:UpdateOriginAccessControl",
+        "cloudfront:DeleteOriginAccessControl", "cloudfront:ListOriginAccessControls"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "Secrets",
+      "Effect": "Allow",
+      "Action": ["ssm:PutParameter", "ssm:GetParameter", "ssm:GetParameters", "ssm:DeleteParameter"],
+      "Resource": "arn:aws:ssm:*:*:parameter/cuentas-bot/*"
+    },
+    {
+      "Sid": "Budget",
+      "Effect": "Allow",
+      "Action": ["budgets:ModifyBudget", "budgets:ViewBudget"],
+      "Resource": "arn:aws:budgets::*:budget/cuentas-bot*"
+    }
+  ]
+}
