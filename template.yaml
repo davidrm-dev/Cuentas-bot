@@ -294,6 +294,7 @@ Resources:
         JobDone:
           Type: EventBridgeRule
           Properties:
+            RuleName: !Sub ${AWS::StackName}-transcribe-done
             Pattern:
               source: [aws.transcribe]
               detail-type: [Transcribe Job State Change]
@@ -332,6 +333,7 @@ Resources:
         Daily:
           Type: ScheduleV2
           Properties:
+            Name: !Sub ${AWS::StackName}-daily
             ScheduleExpression: !Ref DailyScheduleUtc
             RetryPolicy: { MaximumRetryAttempts: 0 }
 
