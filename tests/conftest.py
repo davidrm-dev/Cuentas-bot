@@ -10,7 +10,7 @@ import pytest
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 os.environ.setdefault("CUENTAS_BOT_TELEGRAM_TOKEN", "123:TEST")
 
-from cuentas.models import Debt, Profile, Subscription, Transaction  # noqa: E402
+from cuentas.models import Debt, Profile, SavingsPocket, Subscription, Transaction  # noqa: E402
 
 
 class FakeRepo:
@@ -22,6 +22,7 @@ class FakeRepo:
         self.subs: dict[tuple[int, str], Subscription] = {}
         self.debts: dict[tuple[int, str], Debt] = {}
         self.imports: dict[tuple[int, str], dict[str, Any]] = {}
+        self.pockets: dict[tuple[int, str], SavingsPocket] = {}
         self.messages: list[tuple[int, str, str]] = []
         self.alerts: set[tuple[int, str]] = set()
 
@@ -71,6 +72,15 @@ class FakeRepo:
 
     def get_debt(self, user_id: int, debt_id: str):
         return self.debts.get((user_id, debt_id))
+
+    def save_pocket(self, pocket: SavingsPocket) -> None:
+        self.pockets[(pocket.user_id, pocket.id)] = pocket
+
+    def list_pockets(self, user_id: int):
+        return [p for (u, _), p in self.pockets.items() if u == user_id]
+
+    def delete_pocket(self, pocket: SavingsPocket) -> None:
+        self.pockets.pop((pocket.user_id, pocket.id), None)
 
     def save_import(self, user_id: int, import_id: str, data: dict[str, Any], ttl_days: int = 7) -> None:
         self.imports[(user_id, import_id)] = data

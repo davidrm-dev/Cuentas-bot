@@ -12,6 +12,7 @@ import html
 import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -79,6 +80,12 @@ def run_for_user(repo: Repository, tg: Telegram, profile: Profile, due: list[Sub
         if reminder and repo.claim_alert(profile.user_id, reminder[0]):
             tg.send(profile.chat_id, reminder[1], keyboard=bot.debt_keyboard(debt))
 
+    # 3b) Día de pago: recordar cuánto apartar para el ahorro
+    if profile.payday and today.day == min(profile.payday, month_bounds(today)[1].day):
+        pockets = repo.list_pockets(profile.user_id)
+        if repo.claim_alert(profile.user_id, f"payday-save:{today.strftime('%Y-%m')}"):
+            tg.send(profile.chat_id, payday_savings_text(profile, pockets, today))
+
     # 4) Aprendizaje
     history_start = month_bounds(today.replace(day=1) - timedelta(days=31 * LEARNING_MONTHS))[0]
     history = repo.list_transactions(profile.user_id, history_start.isoformat(), today.isoformat())
@@ -94,6 +101,23 @@ def run_for_user(repo: Repository, tg: Telegram, profile: Profile, due: list[Sub
             if month_txs:
                 tg.send(profile.chat_id, monthly_close_text(profile, month_txs, prev),
                         keyboard=webapp_button("📊 Ver el mes completo"))
+
+
+def payday_savings_text(profile: Profile, pockets: list, today: date) -> str:
+    cur = profile.currency
+    summary = finance.savings_summary(profile, pockets, today)
+    lines = ["💰 <b>¡Día de pago!</b> Antes de gastar, aparta tu ahorro:"]
+    if summary.get("meta_ahorro_mes"):
+        lines.append(f"• Tu meta de ahorro ({profile.savings_goal_pct:.0f}%): {fmt(Decimal(str(summary['meta_ahorro_mes'])), cur)}")
+    for b in summary["bolsillos"]:
+        if b.get("cuota_mensual"):
+            lines.append(f"• {html.escape(b['nombre'])}: {fmt(Decimal(str(b['cuota_mensual'])), cur)} para llegar a la meta")
+    fe = summary.get("fondo_emergencia")
+    if fe and fe["tienes"] < fe["recomendado_minimo"]:
+        lines.append(f"• Fondo de emergencia: cubres {fe['meses_cubiertos']:g} de 3 meses recomendados")
+    if len(lines) == 1:
+        lines.append("Dime cuánto quieres apartar y a qué bolsillo: <i>ahorré 200 mil en la cajita Nu</i>.")
+    return "\n".join(lines)
 
 
 def debt_reminder(profile: Profile, debt: Debt, today: date, ledger: Ledger, subs: list[Subscription],
@@ -121,7 +145,9 @@ def debt_reminder(profile: Profile, debt: Debt, today: date, ledger: Ledger, sub
         spendable = finance.spendable_income(profile)
         if spendable:
             # committed ya incluye esta deuda, así que lo que queda es después de pagarla.
-            left = spendable - finance.committed_month(profile, ledger.month_transactions(), subs, today, debts)
+            pockets = ledger.repo.list_pockets(profile.user_id)
+            left = spendable - finance.committed_month(profile, ledger.month_transactions(), subs, today, debts,
+                                                       pockets)
             text += (f"\nCon lo que tienes planeado te alcanza: después de pagarla te quedarían ~{fmt(left, cur)} "
                      "para el resto del mes." if left >= 0 else
                      f"\nOjo: este mes vas justo, te faltarían ~{fmt(-left, cur)}. Si quieres, pregúntame cómo "

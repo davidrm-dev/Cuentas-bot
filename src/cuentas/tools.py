@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from . import accounts, categories, finance
 from .finance import Alert
 from .ledger import Ledger
-from .models import CYCLES, Debt, Subscription, Transaction, money, new_id
+from .models import CYCLES, Debt, SavingsPocket, Subscription, Transaction, money, new_id
 from .parsing import parse_screen_amount
 
 ALL_CATEGORIES = list(categories.CATEGORIES) + list(categories.INCOME_CATEGORIES)
@@ -268,6 +268,37 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "registrar_ahorro",
+        "description": (
+            "Maneja los bolsillos de ahorro del usuario. accion: 'depositar' (pasó plata al ahorro), 'retirar' "
+            "(sacó del ahorro), 'fijar_saldo' (dice cuánto tiene ahorrado hoy, sin que sea un movimiento nuevo), "
+            "'configurar' (meta, fecha, tasa, dónde lo guarda, si es fondo de emergencia) o 'eliminar'. "
+            "Ahorrar NO es un gasto: nunca lo registres con registrar_movimientos."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "bolsillo": {"type": "string", "description": "Nombre del ahorro: 'viaje', 'emergencias', 'moto'..."},
+                "accion": {"type": "string", "enum": ["depositar", "retirar", "fijar_saldo", "configurar", "eliminar"]},
+                "monto": {"type": "number"},
+                "cuenta_origen": {"type": "string", "enum": ACCOUNT_KEYS,
+                                  "description": "Cuenta de donde salió (o a donde volvió) la plata"},
+                "guardado_en": {"type": "string", "enum": ACCOUNT_KEYS, "description": "Cuenta donde está el ahorro"},
+                "lugar": {"type": "string", "description": "Detalle: cajita, bolsillo, CDT, alcancía, fiducia..."},
+                "meta": {"type": "number", "description": "Monto objetivo, si lo dijo"},
+                "fecha_meta": {**_DATE, "description": "Para cuándo quiere lograrlo (YYYY-MM-DD)"},
+                "tasa_ea": {"type": "number", "description": "Tasa efectiva anual en %, si la dijo (ej. 11.5)"},
+                "emergencia": {"type": "boolean", "description": "true si es su fondo de emergencia"},
+            },
+            "required": ["bolsillo", "accion"],
+        },
+    },
+    {
+        "name": "consultar_ahorros",
+        "description": "Muestra los ahorros: bolsillos, metas, cuánto apartar al mes, rendimientos y fondo de emergencia. Úsala para preguntas sobre su ahorro o cómo administrarlo.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "actualizar_perfil",
         "description": "Guarda datos del contexto económico del usuario: ingreso mensual, día de pago, moneda, meta de ahorro o zona horaria.",
         "input_schema": {
@@ -469,8 +500,9 @@ class ToolExecutor:
         cost = self._amount(args["costo_estimado"]) if args.get("costo_estimado") else None
         subs = self.ledger.repo.list_subscriptions(self.ledger.profile.user_id)
         debts = self.ledger.repo.list_debts(self.ledger.profile.user_id, include_closed=True)
+        pockets = self.ledger.repo.list_pockets(self.ledger.profile.user_id)
         return finance.affordability(self.ledger.profile, self.ledger.month_transactions(), subs,
-                                     self.ledger.today, cost, debts)
+                                     self.ledger.today, cost, debts, pockets)
 
     def _t_planificar_mes(self, args: dict[str, Any]) -> dict[str, Any]:
         events = []
@@ -486,8 +518,9 @@ class ToolExecutor:
             raise ToolInputError("El colchón debe estar entre 0 y 50%")
         subs = self.ledger.repo.list_subscriptions(self.ledger.profile.user_id)
         debts = self.ledger.repo.list_debts(self.ledger.profile.user_id, include_closed=True)
+        pockets = self.ledger.repo.list_pockets(self.ledger.profile.user_id)
         plan = finance.plan_month(self.ledger.profile, self.ledger.month_transactions(), subs, self.ledger.today,
-                                  events, cash, daily, buffer, debts)
+                                  events, cash, daily, buffer, debts, pockets)
         if plan["estado"] != "ok":
             return plan
         self.notes.append(finance.plan_text(plan))
@@ -696,6 +729,98 @@ class ToolExecutor:
                 "antiguos_omitidos": old, "saldo_actualizado": bool(account and saldo is not None),
                 "nota": "El usuario ya recibió el detalle. Responde en 1-2 líneas sin repetir cifras; si algo "
                         "no se veía claro, pídele que lo confirme."}
+
+    def _find_pocket(self, name: str) -> SavingsPocket | None:
+        target = categories.normalize(name)
+        pockets = self.ledger.repo.list_pockets(self.ledger.profile.user_id)
+        exact = [p for p in pockets if categories.normalize(p.name) == target]
+        partial = exact or [p for p in pockets if target in categories.normalize(p.name)
+                            or categories.normalize(p.name) in target]
+        return partial[0] if len(partial) == 1 or exact else None
+
+    def _t_registrar_ahorro(self, args: dict[str, Any]) -> dict[str, Any]:
+        ledger, profile = self.ledger, self.ledger.profile
+        action = args.get("accion")
+        name = str(args.get("bolsillo") or "").strip()[:40]
+        if not name:
+            raise ToolInputError("Falta el nombre del ahorro")
+        pocket = self._find_pocket(name)
+        if action == "eliminar":
+            if pocket is None:
+                return {"error": "No encontré ese ahorro"}
+            ledger.repo.delete_pocket(pocket)
+            return {"eliminado": pocket.name}
+        if action not in ("depositar", "retirar", "fijar_saldo", "configurar"):
+            raise ToolInputError(f"Acción desconocida: {action}")
+        amount = None
+        if args.get("monto") is not None and action != "configurar":
+            amount = self._amount(args["monto"], allow_zero=action == "fijar_saldo")
+            if self.user_text and self.source != "image" and amount not in _amounts_in(self.user_text):
+                raise ToolInputError("El usuario no dijo ese monto: no lo inventes, pregúntale")
+        if action in ("depositar", "retirar") and amount is None:
+            raise ToolInputError("Falta el monto")
+        if pocket is None:
+            if action == "retirar":
+                return {"error": "No encontré ese ahorro", "ahorros": [p.name for p in ledger.repo.list_pockets(profile.user_id)]}
+            pocket = SavingsPocket(user_id=profile.user_id, name=name.capitalize())
+        cur, today = profile.currency, ledger.today.isoformat()
+        line = ""
+        if action == "fijar_saldo":
+            pocket.balance = amount
+            line = f"🐷 {pocket.name}: saldo actualizado a <b>{finance.fmt(amount, cur)}</b>"
+        elif action in ("depositar", "retirar"):
+            signed = amount if action == "depositar" else -amount
+            applied = pocket.move(signed, today, "desde " + args["cuenta_origen"] if args.get("cuenta_origen") else "")
+            source = args.get("cuenta_origen")
+            if accounts.is_valid(source) and source in profile.accounts:
+                acc = profile.accounts[source]
+                acc["saldo"] = money(acc["saldo"] - applied)  # depositar saca de la cuenta; retirar devuelve
+                ledger.repo.save_profile(profile)
+            verb = "Ahorraste" if applied > 0 else "Sacaste"
+            line = (f"🐷 {verb} <b>{finance.fmt(abs(applied), cur)}</b> {'en' if applied > 0 else 'de'} "
+                    f"{pocket.name} → llevas {finance.fmt(pocket.balance, cur)}")
+        for key, attr in (("guardado_en", "account"),):
+            if accounts.is_valid(args.get(key)):
+                setattr(pocket, attr, args[key])
+        if args.get("lugar"):
+            pocket.place = str(args["lugar"])[:40]
+        if args.get("meta"):
+            pocket.goal = self._amount(args["meta"])
+        if args.get("fecha_meta"):
+            pocket.goal_date = self._date(args["fecha_meta"]).isoformat()
+        if args.get("tasa_ea") is not None:
+            rate = Decimal(str(args["tasa_ea"]))
+            if not 0 <= rate <= 60:
+                raise ToolInputError("Tasa EA fuera de rango")
+            pocket.rate_ea = rate
+        if args.get("emergencia") is not None:
+            pocket.emergency = bool(args["emergencia"])
+        ledger.repo.save_pocket(pocket)
+        summary = finance.savings_summary(profile, ledger.repo.list_pockets(profile.user_id), ledger.today)
+        detail = next(b for b in summary["bolsillos"] if b["nombre"] == pocket.name)
+        if pocket.goal:
+            line += f"\n🎯 Meta {finance.fmt(pocket.goal, cur)}: {detail['progreso_pct']:.0f}%"
+            if detail.get("cuota_mensual"):
+                line += f" · aparta {finance.fmt(Decimal(str(detail['cuota_mensual'])), cur)} al mes para llegar a tiempo"
+        if action == "configurar" and not line.startswith("🐷"):
+            line = f"🐷 {pocket.name} configurado" + line
+        self.notes.append(line.strip())
+        return {"bolsillo": pocket.name, "accion": action, "progreso_pct": detail.get("progreso_pct"),
+                "nota": "El usuario ya vio el detalle con las cifras. Si das un consejo, no escribas montos."}
+
+    def _t_consultar_ahorros(self, args: dict[str, Any]) -> dict[str, Any]:
+        profile = self.ledger.profile
+        summary = finance.savings_summary(profile, self.ledger.repo.list_pockets(profile.user_id), self.ledger.today)
+        self.notes.append(finance.savings_text(summary))
+        fe = summary.get("fondo_emergencia") or {}
+        return {"bolsillos": [b["nombre"] for b in summary["bolsillos"]],
+                "metas_con_cuota": [b["nombre"] for b in summary["bolsillos"] if b.get("cuota_mensual")],
+                "fondo_emergencia_suficiente": fe.get("tienes", 0) >= fe.get("recomendado_minimo", 0) if fe else None,
+                "cumple_meta_de_ahorro_del_mes": (summary["ahorrado_este_mes"] >= summary["meta_ahorro_mes"]
+                                                  if summary.get("meta_ahorro_mes") else None),
+                "nota": "El usuario ya recibió el detalle con todas las cifras. Da 1 a 3 consejos para administrar "
+                        "su ahorro (priorizar fondo de emergencia, automatizar el ahorro el día de pago, dónde rinde "
+                        "más) sin escribir montos."}
 
     def _t_actualizar_perfil(self, args: dict[str, Any]) -> dict[str, Any]:
         p = self.ledger.profile

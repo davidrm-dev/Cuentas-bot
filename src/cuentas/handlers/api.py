@@ -88,7 +88,9 @@ def _route(repo: Repository, profile: Profile, event: dict[str, Any]) -> dict[st
         month_txs = [t for t in history if start.isoformat() <= t.date <= end.isoformat()]
         subs = repo.list_subscriptions(profile.user_id)
         debts = repo.list_debts(profile.user_id, include_closed=True)
-        return _response(200, finance.dashboard(profile, month_txs, history, subs, month, ledger.today, debts))
+        pockets = repo.list_pockets(profile.user_id)
+        return _response(200, finance.dashboard(profile, month_txs, history, subs, month, ledger.today, debts,
+                                                pockets))
 
     if route in ("PATCH /api/transactions/{id}", "DELETE /api/transactions/{id}"):
         tx = repo.find_transaction(profile.user_id, params.get("id", ""))

@@ -295,3 +295,52 @@ class Debt:
         return {"id": self.id, "direction": self.direction, "person": self.person, "amount": float(self.amount),
                 "paid": float(self.paid), "balance": float(self.balance), "date": self.date,
                 "due_date": self.due_date, "note": self.note, "closed": self.closed}
+
+
+@dataclass
+class SavingsPocket:
+    """Bolsillo de ahorro: dinero apartado con un propósito (y opcionalmente una meta y una tasa)."""
+
+    user_id: int
+    name: str
+    account: str = ""  # dónde está guardado (clave de accounts.ACCOUNTS) o vacío
+    place: str = ""  # detalle libre: "cajita", "bolsillo", "CDT", "alcancía"...
+    balance: Decimal = Decimal(0)
+    goal: Decimal | None = None
+    goal_date: str | None = None  # YYYY-MM-DD
+    rate_ea: Decimal | None = None  # tasa efectiva anual en %
+    emergency: bool = False
+    movements: list[dict[str, Any]] = field(default_factory=list)  # [{"date", "amount" (+/-), "note"}]
+    id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=utcnow_iso)
+
+    @property
+    def sk(self) -> str:
+        return f"SAVE#{self.id}"
+
+    def move(self, amount: Decimal, when: str, note: str = "") -> Decimal:
+        """Deposita (+) o retira (-) sin dejar el saldo negativo; devuelve lo aplicado."""
+        if amount < 0:
+            amount = -min(-amount, self.balance)
+        self.balance = money(self.balance + amount)
+        self.movements.append({"date": when, "amount": amount, "note": note[:80]})
+        self.movements = self.movements[-200:]
+        return amount
+
+    def to_item(self) -> dict[str, Any]:
+        item = asdict(self)
+        item.update(PK=f"USER#{self.user_id}", SK=self.sk, type="savings")
+        return {k: v for k, v in item.items() if v is not None}
+
+    @classmethod
+    def from_item(cls, item: dict[str, Any]) -> "SavingsPocket":
+        dec = lambda v: money(v) if v is not None else None  # noqa: E731
+        return cls(
+            user_id=int(item["user_id"]), name=item["name"], account=item.get("account", ""),
+            place=item.get("place", ""), balance=money(item.get("balance", 0)), goal=dec(item.get("goal")),
+            goal_date=item.get("goal_date"), rate_ea=Decimal(str(item["rate_ea"])) if item.get("rate_ea") is not None else None,
+            emergency=bool(item.get("emergency", False)),
+            movements=[{"date": m["date"], "amount": money(m["amount"]), "note": m.get("note", "")}
+                       for m in item.get("movements") or []],
+            id=item["id"], created_at=item.get("created_at", ""),
+        )

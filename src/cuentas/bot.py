@@ -30,7 +30,8 @@ HELP = (
     "• <i>Le presté 50 mil a Juan, me paga el viernes</i> · <i>Le debo 200 mil a mi papá</i>\n"
     "• <i>Aparta 200 mil al mes para gasolina</i>\n\n"
     "• <i>Gasté 20 mil en almuerzo con Nequi</i> · <i>Tengo 300 mil en Daviplata</i>\n\n"
-    "Comandos: /resumen /cuentas /prestamos /fijos /dashboard /deshacer /consumo /ayuda"
+    "• <i>Ahorré 100 mil para el viaje en la cajita Nu</i> · <i>¿Cómo voy con mis ahorros?</i>\n\n"
+    "Comandos: /resumen /ahorro /cuentas /prestamos /fijos /dashboard /deshacer /consumo /ayuda"
 )
 
 
@@ -237,7 +238,9 @@ def handle_command(tg: Telegram, repo: Repository, profile: Profile, chat_id: in
     if cmd == "/resumen":
         subs = repo.list_subscriptions(profile.user_id)
         debts = repo.list_debts(profile.user_id, include_closed=True)
-        tg.send(chat_id, finance.summary_text(profile, ledger.month_transactions(), subs, ledger.today, debts),
+        pockets = repo.list_pockets(profile.user_id)
+        tg.send(chat_id, finance.summary_text(profile, ledger.month_transactions(), subs, ledger.today, debts,
+                                              pockets),
                 keyboard=webapp_button("📊 Ver dashboard completo"))
         return True
     if cmd == "/consumo":
@@ -266,6 +269,10 @@ def handle_command(tg: Telegram, repo: Repository, profile: Profile, chat_id: in
             lines += [f"• {html.escape(r['nombre'].capitalize())}: {fmt(r['gastado'], cur)} de {fmt(r['monto'], cur)}"
                       f" — quedan {fmt(r['pendiente'], cur)} apartados" for r in reserves]
         tg.send(chat_id, "\n".join(lines))
+        return True
+    if cmd == "/ahorro":
+        summary = finance.savings_summary(profile, repo.list_pockets(profile.user_id), ledger.today)
+        tg.send(chat_id, finance.savings_text(summary), keyboard=webapp_button("🐷 Ver en el dashboard"))
         return True
     if cmd == "/cuentas":
         summary = finance.accounts_summary(profile, ledger.month_transactions())

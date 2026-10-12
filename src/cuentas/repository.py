@@ -5,6 +5,7 @@ PK = USER#<id>
   SK = TX#<YYYY-MM-DD>#<id>        movimientos (gastos e ingresos)
   SK = SUB#<id>                    suscripciones
   SK = DEBT#<id>                   préstamos (me deben / debo)
+  SK = SAVE#<id>                   bolsillos de ahorro
   SK = IMPORT#<id>                 movimientos importados de un pantallazo (TTL, para deshacer)
   SK = MSG#<iso>                   historial corto de conversación (TTL)
   SK = ALERT#<clave>               alertas ya enviadas, para no repetirlas (TTL)
@@ -20,7 +21,7 @@ from typing import Any, Iterable
 from boto3.dynamodb.conditions import Attr, Key
 
 from . import config
-from .models import Debt, Profile, Subscription, Transaction, to_dynamo
+from .models import Debt, Profile, SavingsPocket, Subscription, Transaction, to_dynamo
 
 
 class Repository:
@@ -117,6 +118,19 @@ class Repository:
     def get_debt(self, user_id: int, debt_id: str) -> Debt | None:
         item = self.table.get_item(Key={"PK": f"USER#{user_id}", "SK": f"DEBT#{debt_id}"}).get("Item")
         return Debt.from_item(item) if item else None
+
+    # ---- ahorro -------------------------------------------------------
+    def save_pocket(self, pocket: SavingsPocket) -> None:
+        self.table.put_item(Item=to_dynamo(pocket.to_item()))
+
+    def list_pockets(self, user_id: int) -> list[SavingsPocket]:
+        items = self._paginate(
+            KeyConditionExpression=Key("PK").eq(f"USER#{user_id}") & Key("SK").begins_with("SAVE#"),
+        )
+        return [SavingsPocket.from_item(i) for i in items]
+
+    def delete_pocket(self, pocket: SavingsPocket) -> None:
+        self.table.delete_item(Key={"PK": f"USER#{pocket.user_id}", "SK": pocket.sk})
 
     # ---- importaciones de pantallazos (para poder deshacerlas) -------
     def save_import(self, user_id: int, import_id: str, data: dict[str, Any], ttl_days: int = 7) -> None:

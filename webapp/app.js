@@ -32,6 +32,7 @@
         style: "currency", currency, currencyDisplay: "narrowSymbol",
         maximumFractionDigits: abs >= 1000 || Number.isInteger(v) ? 0 : 2,
         notation: opts.compact ? "compact" : "standard",
+        useGrouping: opts.compact ? "auto" : "always", // "9.600 $" como en Colombia, no "9600 $"
       }).format(v);
     } catch (_) {
       return `${v.toFixed(0)} ${currency}`;
@@ -167,6 +168,7 @@
     renderSubscriptions(d);
     renderReservesAndDebts(d);
     renderAccounts(d);
+    renderSavings(d);
     renderSettings(d);
   }
 
@@ -481,6 +483,53 @@
     }
   }
 
+  function renderSavings(d) {
+    const sv = d.savings || { bolsillos: [], total_ahorrado: 0, ahorrado_este_mes: 0 };
+    const tiles = $("#savings-tiles");
+    tiles.replaceChildren();
+    tiles.append(tile("Ahorro total", money(sv.total_ahorrado), sv.rendimiento_mensual_total ? `rinde ~${money(sv.rendimiento_mensual_total)}/mes` : ""));
+    const goal = sv.meta_ahorro_mes;
+    tiles.append(tile("Ahorrado este mes", money(sv.ahorrado_este_mes),
+      goal ? `meta ${money(goal)}` : "", goal ? (sv.ahorrado_este_mes >= goal ? "good" : "bad") : ""));
+    const fe = sv.fondo_emergencia;
+    $("#emergency-card").hidden = !fe;
+    if (fe) {
+      const months = Math.min(6, fe.meses_cubiertos);
+      $("#emergency-sub").textContent = `Lo sano es tener entre ${money(fe.recomendado_minimo)} y ${money(fe.recomendado_ideal)} (3 a 6 meses de tus gastos).`;
+      const meter = $("#emergency-meter");
+      meter.setAttribute("aria-valuenow", String(months));
+      const fill = meter.firstElementChild;
+      fill.style.width = `${(months / 6) * 100}%`;
+      const [color, icon, word] = fe.meses_cubiertos >= 3 ? ["var(--good)", "✓", "Cubierto"] : ["var(--warning)", "⚠️", "Por debajo de lo recomendado"];
+      fill.style.background = color;
+      $("#emergency-tag").textContent = `${icon} ${word} · ${fe.meses_cubiertos.toLocaleString("es")} meses${fe.solo_bolsillos_de_emergencia ? "" : " (contando todo tu ahorro)"}`;
+    }
+    const list = $("#pockets");
+    list.replaceChildren();
+    if (!sv.bolsillos.length) { list.append(el("li", { class: "empty" }, "Aún no tienes ahorros registrados.")); return; }
+    for (const b of sv.bolsillos) {
+      const li = el("li");
+      const head = el("div", { class: "budget-head" });
+      head.append(el("span", {}, `${b.emergencia ? "🛟" : b.meta ? "🎯" : "💰"} ${b.nombre}`),
+        el("span", {}, b.meta ? `${money(b.saldo)} / ${money(b.meta)}` : money(b.saldo)));
+      li.append(head);
+      if (b.meta) {
+        const meter = el("div", { class: "meter", role: "meter", "aria-valuenow": Math.round(b.progreso_pct),
+          "aria-valuemin": "0", "aria-valuemax": "100", "aria-label": b.nombre });
+        const fill = el("div");
+        fill.style.width = `${b.progreso_pct}%`;
+        fill.style.background = b.progreso_pct >= 100 ? "var(--good)" : "var(--series-1)";
+        meter.append(fill);
+        li.append(meter);
+      }
+      const meta = [b.donde, b.cuota_mensual ? `aparta ${money(b.cuota_mensual)}/mes (${b.meses_restantes} meses)` : "",
+        b.tasa_ea ? `${b.tasa_ea}% EA · rinde ~${money(b.rendimiento_mensual)}/mes` : "",
+        b.meta && b.falta === 0 ? "✅ meta cumplida" : ""].filter(Boolean).join(" · ");
+      if (meta) li.append(el("div", { class: "status-tag" }, meta));
+      list.append(li);
+    }
+  }
+
   function renderAccounts(d) {
     const list = $("#accounts");
     list.replaceChildren();
@@ -645,6 +694,16 @@
         "Prefiere comunicarse con notas de voz.",
       ],
       category_catalog: cats,
+      savings: {
+        moneda: "COP", total_ahorrado: 2350000, ahorrado_este_mes: 300000, meta_ahorro_mes: 420000,
+        rendimiento_mensual_total: 9600, cuotas_mensuales_total: 250000,
+        bolsillos: [
+          { nombre: "Emergencias", saldo: 1350000, emergencia: true, donde: "🟣 Nu · cajita", tasa_ea: 9.25, rendimiento_mensual: 9600, movido_este_mes: 200000 },
+          { nombre: "Viaje a Cartagena", saldo: 800000, meta: 1800000, progreso_pct: 44.4, falta: 1000000, meses_restantes: 4, cuota_mensual: 250000, emergencia: false, donde: "💜 Nequi · bolsillo", movido_este_mes: 100000 },
+          { nombre: "Moto", saldo: 200000, emergencia: false, donde: "💵 Efectivo", movido_este_mes: 0 },
+        ],
+        fondo_emergencia: { recomendado_minimo: 9900000, recomendado_ideal: 20000000, tienes: 1350000, meses_cubiertos: 0.4, solo_bolsillos_de_emergencia: true },
+      },
       accounts: [{ key: "nequi", label: "💜 Nequi", balance: 312000, updated: "2026-10-15" },
                  { key: "efectivo", label: "💵 Efectivo", balance: 45000, updated: "2026-10-14" }],
       spent_by_account: [{ label: "💜 Nequi", amount: 980000 }, { label: "🟣 Nu", amount: 610000 }, { label: "💵 Efectivo", amount: 348000 }],

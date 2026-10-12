@@ -71,7 +71,8 @@ class Ledger:
             return []  # gastos de meses pasados no disparan alertas del mes en curso
         subs = self.repo.list_subscriptions(self.profile.user_id)
         debts = self.repo.list_debts(self.profile.user_id, include_closed=True)
-        alerts = check_alerts(self.profile, tx, self.month_transactions(), subs, self.today, debts)
+        pockets = self.repo.list_pockets(self.profile.user_id)
+        alerts = check_alerts(self.profile, tx, self.month_transactions(), subs, self.today, debts, pockets)
         return [a for a in alerts if self.repo.claim_alert(self.profile.user_id, a.key)]
 
     def recategorize(self, tx: Transaction, category: str) -> Transaction:

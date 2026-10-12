@@ -19,6 +19,7 @@
       <button role="tab" data-tab="resumen" aria-selected="true">Resumen</button>
       <button role="tab" data-tab="movimientos">Movimientos</button>
       <button role="tab" data-tab="suscripciones">Fijos</button>
+      <button role="tab" data-tab="ahorro">Ahorro</button>
       <button role="tab" data-tab="perfil">Ajustes</button>
     </nav>
 
@@ -85,6 +86,21 @@
           <h2>Préstamos</h2>
           <ul class="rows" id="debts"></ul>
           <p class="hint">Ejemplo: <i>“le presté 50 mil a Juan, me paga el viernes”</i>.</p>
+        </div>
+      </section>
+
+      <section data-panel="ahorro" hidden>
+        <div class="tiles" id="savings-tiles"></div>
+        <div class="card" id="emergency-card" hidden>
+          <h2>Fondo de emergencia</h2>
+          <p class="sub" id="emergency-sub"></p>
+          <div class="meter" id="emergency-meter" role="meter" aria-valuemin="0" aria-valuemax="6"><div></div></div>
+          <div class="status-tag" id="emergency-tag"></div>
+        </div>
+        <div class="card">
+          <h2>Bolsillos</h2>
+          <ul class="budgets" id="pockets"></ul>
+          <p class="hint">Díselo al bot: <i>“ahorré 100 mil para el viaje en la cajita Nu”</i>, <i>“quiero juntar 2 millones para diciembre”</i>, <i>“tengo un CDT de 1 millón al 11% EA”</i>.</p>
         </div>
       </section>
 

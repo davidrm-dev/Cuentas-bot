@@ -63,7 +63,8 @@ _NEEDS_MODEL = re.compile(
     r"\b(ayer|anteayer|antier|semana|mes|lunes|martes|miercoles|jueves|viernes|sabado|domingo|"
     r"cada|mensual|semanal|anual|suscripcion|presupuesto|tope|no|borra|elimina|corrige|cambia|"
     r"cuanto|cuanta|deberia|puedo|alcanza|dolares|euros|usd|eur|millon|millones|palo|palos|medio|"
-    r"le|les|preste|prestaron|presto|prestamo|debo|debe|deuda|abono|abone|devolvi|devolvio|me pago|fijo)\b"
+    r"le|les|preste|prestaron|presto|prestamo|debo|debe|deuda|abono|abone|devolvi|devolvio|me pago|fijo|"
+    r"ahorro|ahorre|ahorrado|ahorrar|cajita|bolsillo|cdt)\b"
     r"|\?|\d{1,2}/\d{1,2}"
 )
 
