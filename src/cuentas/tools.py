@@ -331,12 +331,22 @@ class ToolExecutor:
         subs = self.ledger.repo.list_subscriptions(self.ledger.profile.user_id)
         plan = finance.plan_month(self.ledger.profile, self.ledger.month_transactions(), subs, self.ledger.today,
                                   events, cash, daily, buffer)
-        if plan["estado"] == "ok":
-            self.notes.append(finance.plan_text(plan))
-            plan["nota"] = ("El desglose con todas las cifras ya se le envió al usuario. No repitas cifras ni "
-                            "inventes otras; da solo un veredicto corto y 1 a 3 consejos prácticos. Este cálculo "
-                            "NO reserva la meta de ahorro: no digas que la protege.")
-        return plan
+        if plan["estado"] != "ok":
+            return plan
+        self.notes.append(finance.plan_text(plan))
+        # Al modelo solo le llega lo cualitativo: así no puede citar mal (ni inventar) ninguna cifra.
+        return {
+            "estado": "ok",
+            "desglose_enviado": True,
+            "necesita_prestamo": plan["monto_a_pedir"] > 0,
+            "recortar_no_esenciales_ayuda": plan["ahorro_si_recorta_no_esenciales"] > 0,
+            "eventos": [e["descripcion"] for e in plan["eventos"]],
+            "eventos_despues_del_pago": plan.get("eventos_despues_del_pago", []),
+            "prestamo_vs_ingreso_pct": plan.get("prestamo_vs_ingreso_pct"),
+            "nota": ("El usuario ya recibió el desglose con todas las cifras y el monto exacto a pedir. NO escribas "
+                     "montos. Da un veredicto corto y 1 a 3 consejos prácticos (cómo abaratar los eventos, qué "
+                     "recortar, cómo y cuándo devolver). Este cálculo no reserva su meta de ahorro."),
+        }
 
     def _t_actualizar_perfil(self, args: dict[str, Any]) -> dict[str, Any]:
         p = self.ledger.profile

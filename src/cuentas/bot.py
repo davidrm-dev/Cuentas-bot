@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import logging
+import re
 from typing import Any
 
 from . import assistant, categories, config, finance, learning, parsing, usage
@@ -60,6 +61,19 @@ def send_alerts(tg: Telegram, chat_id: int, alerts: list[Alert]) -> None:
                 keyboard=webapp_button("Ver detalle") if alert.level == "critical" else None)
 
 
+_AMOUNT_IN_TEXT = re.compile(r"\$\s?[\d.]+")
+
+
+def drop_unbacked_amounts(text: str, notes: list[str]) -> str:
+    """Quita frases del modelo con montos que no aparecen en los desgloses calculados por código."""
+    if not notes:
+        return text
+    allowed = {a.replace(" ", "") for n in notes for a in _AMOUNT_IN_TEXT.findall(n)}
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    kept = [s for s in sentences if all(a.replace(" ", "") in allowed for a in _AMOUNT_IN_TEXT.findall(s))]
+    return " ".join(kept).strip() or "Ese es el plan. Si quieres, ajustamos los eventos o el colchón."
+
+
 def handle_conversation(tg: Telegram, repo: Repository, profile: Profile, chat_id: int, text: str,
                         source: str = "text", reply_to: int | None = None) -> None:
     """Pasa el mensaje (escrito o transcrito) al asistente y envía su respuesta."""
@@ -83,6 +97,7 @@ def handle_conversation(tg: Telegram, repo: Repository, profile: Profile, chat_i
     keyboard = tx_keyboard(result.recorded[-1]) if len(result.recorded) == 1 else None
     for note in result.notes:
         tg.send(chat_id, note, reply_to=reply_to)
+    result.text = drop_unbacked_amounts(result.text, result.notes)
     tg.send(chat_id, result.text, keyboard=keyboard, reply_to=None if result.notes else reply_to)
     send_alerts(tg, chat_id, result.alerts)
     repo.add_message(profile.user_id, "user", text)

@@ -59,10 +59,13 @@ def test_plan_asks_for_missing_data(profile):
 
 
 def test_plan_tool(repo, profile, now):
-    out = json.loads(ToolExecutor(Ledger(repo, profile, now)).run("planificar_mes", {
+    ex = ToolExecutor(Ledger(repo, profile, now))
+    out = json.loads(ex.run("planificar_mes", {
         "eventos": [{"descripcion": "Grado de mi hermano", "monto": 200000, "fecha": "2026-10-24"}],
         "saldo_actual": 300000, "gasto_diario_estimado": 25000}))
-    assert out["estado"] == "ok" and out["total_eventos"] == 200000.0 and out["monto_a_pedir"] > 0
+    assert out["estado"] == "ok" and out["necesita_prestamo"] is True
+    assert not any(isinstance(v, float) and v > 1000 for v in out.values())  # sin cifras para el modelo
+    assert "Grado de mi hermano (24/10): $200.000 COP" in ex.notes[0]
 
 
 def test_plan_text_is_local_format(profile):
@@ -99,3 +102,14 @@ def test_plan_note_sent_before_advice(monkeypatch, repo, tg, profile):
     bot.handle_conversation(tg, repo, profile, 1, "¿cuánto le pido a mis papás para el cine?")
     assert tg.sent[0]["text"].startswith("🧮") and "Pide" in tg.sent[0]["text"]
     assert tg.sent[1]["text"] == "Pídelo y devuélvelo en 2 meses."
+
+
+def test_drop_unbacked_amounts():
+    from cuentas.bot import drop_unbacked_amounts
+
+    note = "👉 <b>Pide $700.000 COP</b>\nNecesitas: $1.100.000 COP"
+    text = ("Pide <b>$1.100.000 COP</b> a tus papás. Lleva almuerzo a la boda. "
+            "Devuélvelo en cuotas de $40.000 COP. Pide $700.000 COP y listo.")
+    assert drop_unbacked_amounts(text, [note]) == ("Pide <b>$1.100.000 COP</b> a tus papás. Lleva almuerzo a la boda. "
+                                                   "Pide $700.000 COP y listo.")
+    assert drop_unbacked_amounts("Cuesta $5 COP.", []) == "Cuesta $5 COP."
