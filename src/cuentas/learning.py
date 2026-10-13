@@ -89,6 +89,8 @@ def recompute(profile: Profile, history: list[Transaction], today: date) -> None
     weekend = total_var = discretionary = expense_total = 0.0
     for tx in complete:
         amount = float(tx.amount)
+        if tx.kind == "transfer":
+            continue
         if tx.kind == "income":
             income_by_month[tx.date[:7]] += amount
             continue

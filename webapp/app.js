@@ -417,7 +417,7 @@
         main.append(el("div", { class: "desc" }, t.description || rest.join(" ")),
           el("div", { class: "cat" }, `${rest.join(" ")}${t.account && d.account_catalog ? ` · ${d.account_catalog[t.account] || t.account}` : ""}${t.source === "voice" ? " · 🎙️" : ""}${t.source === "image" ? " · 📸" : ""}${t.source === "subscription" ? " · 🔁" : ""}`));
         b.append(el("span", { class: "emoji", "aria-hidden": "true" }, emoji), main,
-          el("span", { class: `amt ${t.kind}` }, `${t.kind === "income" ? "+" : "−"}${money(t.amount)}`));
+          el("span", { class: `amt ${t.kind}` }, `${t.kind === "income" ? "+" : t.kind === "transfer" ? "↔ " : "−"}${money(t.amount)}`));
         b.addEventListener("click", () => openTx(t));
         group.append(b);
       }

@@ -47,9 +47,10 @@ def test_fast_path_records_without_model(monkeypatch, repo, tg, profile):
 
 def test_daily_llm_limit(monkeypatch, repo, tg, profile):
     no_model(monkeypatch)
-    today = date.today()
+    from cuentas.finance import today_for
+
+    today = today_for(profile)  # el día del usuario (Bogotá), no el del servidor
     profile.stats["llm_daily"] = {"date": today.isoformat(), "count": config.DAILY_LLM_LIMIT}
-    monkeypatch.setattr(bot.Ledger, "today", today, raising=False)
     bot.handle_conversation(tg, repo, profile, 1, "¿debería salir hoy?")
     assert "límite diario" in tg.sent[0]["text"]
     profile.stats["llm_daily"] = {"date": "2000-01-01", "count": 999}

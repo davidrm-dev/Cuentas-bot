@@ -54,9 +54,8 @@ def test_account_tools(repo, profile, now):
     ex.run("actualizar_saldo_cuenta", {"cuenta": "nu", "saldo": 500000})
     ex.run("registrar_movimientos", {"movimientos": [
         {"tipo": "gasto", "monto": 40000, "descripcion": "Cine", "categoria": "ocio", "cuenta": "nu"}]})
-    out = json.loads(ex.run("consultar_cuentas", {}))
-    assert out["saldos"] == {"🟣 Nu": 460000.0}
-    assert out["gastado_este_mes_por_cuenta"] == {"🟣 Nu": 40000.0}
+    json.loads(ex.run("consultar_cuentas", {}))
+    assert "Saldo: <b>$460.000 COP</b>" in ex.notes[-1] and "salió $40.000 COP" in ex.notes[-1]
     with pytest.raises(ToolInputError):
         ex.run("transferir_entre_cuentas", {"desde": "nu", "hacia": "nu", "monto": 1})
     json.loads(ex.run("actualizar_perfil", {"cuenta_principal": "nequi"}))
@@ -193,3 +192,41 @@ def test_guards_block_unrequested_changes(repo, profile, now):
     ToolExecutor(ledger, user_text="tengo 23.927 en nequi").run("actualizar_saldo_cuenta",
                                                                  {"cuenta": "nequi", "saldo": 23927})
     assert profile.accounts["nequi"]["saldo"] == Decimal("23927")
+
+
+def test_angela_case_transfer_and_month_income(repo, tg, profile, now):
+    """Caso real: ingreso declarado 500k, entraron 620k, gastó 589.3k y pasó 30k de Nequi a Nu."""
+    from cuentas import finance
+
+    profile.monthly_income = Decimal("500000")
+    ledger = Ledger(repo, profile, now)
+    for amount, day in (("60000", "2026-10-04"), ("500000", "2026-10-05"), ("60000", "2026-10-11")):
+        ledger.record(Transaction(user_id=1, kind="income", amount=Decimal(amount), category="otros_ingresos",
+                                  description="ingreso", date=day, account="nequi"))
+    ledger.record(Transaction(user_id=1, kind="expense", amount=Decimal("589300"), category="vivienda",
+                              description="gastos", date="2026-10-05", account="nequi"))
+    ex = ToolExecutor(ledger, user_text="el 05 de octubre envié a mi cuenta nu 30.000")
+    ex.run("transferir_entre_cuentas", {"desde": "nequi", "hacia": "nu", "monto": 30000, "fecha": "2026-10-05"})
+    month = ledger.month_transactions()
+    assert finance.totals(month)["expense"] == Decimal("589300")  # la transferencia no es gasto
+    text = finance.summary_text(profile, month, [], ledger.today)
+    assert "Te queda: <b>$30.700 COP</b>" in text  # 620.000 - 589.300, no -139.300
+    assert "Meta de ahorro (10%): $62.000 COP · te faltan $31.300 COP" in text
+    accounts_text = finance.accounts_text(profile, month)
+    assert "Este mes entró $620.000 COP y salió $619.300 COP (neto $700 COP)" in accounts_text
+    assert "entró $30.000 COP y salió $0 COP" in accounts_text  # Nu
+    assert ex.recorded[0].kind == "transfer"
+    from cuentas.bot import confirmation_text
+    assert "🔁 Transferencia: <b>$30.000 COP</b> · 💜 Nequi → 🟣 Nu · 05/10" in confirmation_text(profile, ex.recorded, "")
+
+
+def test_list_movements_and_future_date(repo, profile, now):
+    ledger = Ledger(repo, profile, now)
+    ex = ToolExecutor(ledger, user_text="El 16 de octubre gasté en desayuno 6.300")
+    ex.run("registrar_movimientos", {"movimientos": [
+        {"tipo": "gasto", "monto": 6300, "descripcion": "Desayuno", "categoria": "restaurantes", "fecha": "2026-10-16",
+         "cuenta": "nequi"}]})
+    assert "todavía no llega" in ex.notes[0] and ex.recorded[0].date == "2026-10-15"
+    lister = ToolExecutor(ledger, user_text="dame mis movimientos de nequi")
+    lister.run("listar_movimientos", {"cuenta": "nequi", "orden": "antiguos_primero"})
+    assert "15/10 −$6.300 COP Desayuno" in lister.notes[0]

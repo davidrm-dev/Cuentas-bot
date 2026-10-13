@@ -51,6 +51,8 @@ def totals(txs: Iterable[Transaction]) -> dict[str, Any]:
     by_category: dict[str, Decimal] = defaultdict(lambda: ZERO)
     income = expense = discretionary = ZERO
     for tx in txs:
+        if tx.kind == "transfer":
+            continue  # mover plata entre cuentas propias no es ingreso ni gasto
         if tx.kind == "income":
             income += tx.amount
         else:
@@ -161,8 +163,18 @@ def reference_income(profile: Profile) -> Decimal | None:
     return money(learned) if learned else None
 
 
-def spendable_income(profile: Profile) -> Decimal | None:
-    income = reference_income(profile)
+def month_income(profile: Profile, month_txs: Iterable[Transaction] | None = None) -> Decimal | None:
+    """Ingreso del mes: lo declarado/aprendido o lo que realmente entró, lo que sea mayor."""
+    reference = reference_income(profile)
+    received = totals(month_txs)["income"] if month_txs is not None else ZERO
+    if reference is None and not received:
+        return None
+    return max(reference or ZERO, received)
+
+
+def spendable_income(profile: Profile, month_txs: Iterable[Transaction] | None = None) -> Decimal | None:
+    """Lo que se puede gastar en el mes sin tocar la meta de ahorro."""
+    income = month_income(profile, list(month_txs) if month_txs is not None else None)
     if income is None:
         return None
     return money(income * (Decimal(100) - profile.savings_goal_pct) / Decimal(100))
@@ -207,7 +219,7 @@ def check_alerts(profile: Profile, tx: Transaction, month_txs: list[Transaction]
                                 f"({fmt(spent, cur)} de {fmt(budget, cur)})."))
 
     # 2) Gasto total contra lo que se puede gastar sin tocar la meta de ahorro
-    spendable = spendable_income(profile)
+    spendable = spendable_income(profile, month_txs)
     if spendable:
         committed = committed_month(profile, month_txs, subs, today, debts, pockets)
         pct = committed / spendable * 100
@@ -263,7 +275,7 @@ def affordability(profile: Profile, month_txs: list[Transaction], subs: list[Sub
                   today: date, cost: Decimal | None = None, debts: Iterable[Debt] = (),
                   pockets: Iterable[SavingsPocket] = ()) -> dict[str, Any]:
     cur = profile.currency
-    spendable = spendable_income(profile)
+    spendable = spendable_income(profile, month_txs)
     _, last = month_bounds(today)
     days_left = (last - today).days + 1
     t = totals(month_txs)
@@ -516,7 +528,49 @@ def accounts_summary(profile: Profile, month_txs: Iterable[Transaction]) -> dict
         "saldo_total_registrado": float(sum((v["saldo"] for v in profile.accounts.values()), ZERO)),
         "gastado_este_mes_por_cuenta": {(accounts.label(k) if k != "sin_cuenta" else "Sin cuenta"): float(v)
                                         for k, v in sorted(spent.items(), key=lambda kv: -kv[1])},
+        "movido_este_mes_por_cuenta": {
+            (accounts.label(k) if k != "sin_cuenta" else "Sin cuenta"):
+                {"entro": float(v["entra"]), "salio": float(v["sale"]), "neto": float(v["entra"] - v["sale"])}
+            for k, v in account_flows(month_txs).items()},
     }
+
+
+def accounts_text(profile: Profile, month_txs: list[Transaction]) -> str:
+    """Saldos conocidos y lo que se movió por cuenta este mes, armado por código (sin cifras del modelo)."""
+    cur = profile.currency
+    flows = account_flows(month_txs)
+    keys = list(dict.fromkeys(list(profile.accounts) + [k for k in flows if k != "sin_cuenta"]))
+    if not keys:
+        return "Aún no tengo movimientos por cuenta. Dime con qué pagas (Nequi, efectivo...) o tu saldo actual."
+    lines = ["🏦 <b>Tus cuentas</b>"]
+    for k in keys:
+        lines.append(f"\n<b>{accounts.label(k)}</b>")
+        if k in profile.accounts:
+            lines.append(f"Saldo: <b>{fmt(profile.accounts[k]['saldo'], cur)}</b>")
+        f = flows.get(k)
+        if f:
+            lines.append(f"Este mes entró {fmt(f['entra'], cur)} y salió {fmt(f['sale'], cur)} "
+                         f"(neto {fmt(f['entra'] - f['sale'], cur)})")
+        if k not in profile.accounts:
+            lines.append("<i>No sé con cuánto empezaste; dime tu saldo real y lo llevo al día.</i>")
+    if "sin_cuenta" in flows:
+        f = flows["sin_cuenta"]
+        lines.append(f"\nSin cuenta asignada: entró {fmt(f['entra'], cur)}, salió {fmt(f['sale'], cur)}")
+    return "\n".join(lines)
+
+
+def account_flows(txs: Iterable[Transaction]) -> dict[str, dict[str, Decimal]]:
+    """Por cuenta: lo que entró y salió (ingresos, gastos y transferencias entre cuentas propias)."""
+    flows: dict[str, dict[str, Decimal]] = defaultdict(lambda: {"entra": ZERO, "sale": ZERO})
+    for tx in txs:
+        if tx.kind == "transfer":
+            flows[tx.account or "sin_cuenta"]["sale"] += tx.amount
+            flows[tx.merchant or "sin_cuenta"]["entra"] += tx.amount
+        elif tx.kind == "income":
+            flows[tx.account or "sin_cuenta"]["entra"] += tx.amount
+        else:
+            flows[tx.account or "sin_cuenta"]["sale"] += tx.amount
+    return flows
 
 
 def _spent_by_account(month_txs: Iterable[Transaction]) -> dict[str, Decimal]:
@@ -624,6 +678,27 @@ def savings_text(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def movements_text(profile: Profile, txs: list[Transaction], start: date, end: date,
+                   account: str | None = None, limit: int = 60) -> str:
+    cur = profile.currency
+    where = f" · {accounts.label(account)}" if account else ""
+    lines = [f"📋 <b>Movimientos del {start.day:02d}/{start.month:02d} al {end.day:02d}/{end.month:02d}{where}</b>"]
+    if not txs:
+        return lines[0] + "\nNo hay movimientos en ese rango."
+    for tx in txs[:limit]:
+        if tx.kind == "transfer":
+            sign, label = "↔", f"{accounts.label(tx.account)} → {accounts.label(tx.merchant)}"
+        else:
+            sign = "+" if tx.kind == "income" else "−"
+            label = categories.label(tx.category)
+        lines.append(f"{tx.date[8:]}/{tx.date[5:7]} {sign}{fmt(tx.amount, cur)} {tx.description[:40]} · {label}")
+    if len(txs) > limit:
+        lines.append(f"…y {len(txs) - limit} más (míralos todos en el dashboard)")
+    t = totals(txs)
+    lines.append(f"\nEntró {fmt(t['income'], cur)} · salió {fmt(t['expense'], cur)}")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Resúmenes
 # ---------------------------------------------------------------------------
@@ -661,12 +736,19 @@ def summary_text(profile: Profile, txs: list[Transaction], subs: list[Subscripti
     lines = [f"<b>📊 {today.strftime('%m/%Y')}</b>",
              f"Ingresos: <b>{fmt(t['income'], cur)}</b>",
              f"Gastos: <b>{fmt(t['expense'], cur)}</b>"]
-    spendable = spendable_income(profile)
-    if spendable:
-        debts = list(debts)
-        pockets = list(pockets)
+    debts, pockets = list(debts), list(pockets)
+    income = month_income(profile, txs)
+    if income:
         committed = committed_month(profile, txs, subs, today, debts, pockets)
-        lines.append(f"Disponible restante: <b>{fmt(spendable - committed, cur)}</b>")
+        left = income - committed
+        goal = money(income * profile.savings_goal_pct / 100)
+        lines.append(f"Te queda: <b>{fmt(left, cur)}</b>")
+        if goal > 0 and left < goal:
+            lines.append(f"Meta de ahorro ({profile.savings_goal_pct:.0f}%): {fmt(goal, cur)} · "
+                         + (f"te faltan {fmt(goal - left, cur)}" if left > 0 else "este mes no alcanza"))
+        elif goal > 0:
+            lines.append(f"Puedes gastar <b>{fmt(left - goal, cur)}</b> más sin tocar tu meta de ahorro "
+                         f"({fmt(goal, cur)})")
         if pockets:
             lines.append(f"Ahorrado: {fmt(sum((p.balance for p in pockets), ZERO), cur)} (/ahorro)")
         pending = [r for r in reserves_remaining(profile, txs) if r["pendiente"] > 0]
@@ -699,7 +781,7 @@ def dashboard(profile: Profile, month_txs: list[Transaction], history_txs: list[
     """Datos completos para la mini app."""
     start, end = month_bounds(month)
     t = totals(month_txs)
-    spendable = spendable_income(profile)
+    spendable = spendable_income(profile, month_txs)
     is_current = start <= today <= end
 
     daily: dict[str, float] = defaultdict(float)
@@ -716,7 +798,8 @@ def dashboard(profile: Profile, month_txs: list[Transaction], history_txs: list[
 
     monthly: dict[str, dict[str, float]] = defaultdict(lambda: {"income": 0.0, "expense": 0.0})
     for tx in history_txs:
-        monthly[tx.date[:7]]["income" if tx.kind == "income" else "expense"] += float(tx.amount)
+        if tx.kind != "transfer":
+            monthly[tx.date[:7]]["income" if tx.kind == "income" else "expense"] += float(tx.amount)
 
     weekday = [0.0] * 7
     for tx in history_txs:

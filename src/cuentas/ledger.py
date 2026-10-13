@@ -29,23 +29,30 @@ class Ledger:
     # ---- saldos por cuenta ------------------------------------------
     def _apply_balance(self, tx: Transaction, sign: int) -> None:
         """Ajusta el saldo de la cuenta del movimiento, si el usuario lleva saldo de esa cuenta."""
-        acc = self.profile.accounts.get(tx.account)
-        if acc is None:
-            return
-        delta = tx.amount if tx.kind == "income" else -tx.amount
-        acc["saldo"] = money(acc["saldo"] + sign * delta)
+        if tx.kind == "transfer":  # sale de la cuenta origen y entra a la destino (guardada en merchant)
+            moves = [(tx.account, -tx.amount), (tx.merchant, tx.amount)]
+        else:
+            moves = [(tx.account, tx.amount if tx.kind == "income" else -tx.amount)]
+        for account, delta in moves:
+            acc = self.profile.accounts.get(account)
+            if acc is not None:
+                acc["saldo"] = money(acc["saldo"] + sign * delta)
 
     def set_balance(self, account: str, balance: Decimal) -> None:
         self.profile.accounts[account] = {"saldo": money(balance), "actualizado": self.today.isoformat()}
         self.repo.save_profile(self.profile)
 
-    def transfer(self, source: str, target: str, amount: Decimal) -> None:
-        """Mover plata entre cuentas propias no es gasto: solo cambia los saldos."""
-        for account, delta in ((source, -amount), (target, amount)):
-            if account in self.profile.accounts:
-                acc = self.profile.accounts[account]
-                acc["saldo"] = money(acc["saldo"] + delta)
-        self.repo.save_profile(self.profile)
+    def transfer(self, source: str, target: str, amount: Decimal, when: str | None = None,
+                 source_kind: str = "text") -> Transaction:
+        """Mover plata entre cuentas propias no es gasto: queda registrado y mueve los saldos que se lleven."""
+        from .accounts import ACCOUNTS
+
+        tx = Transaction(user_id=self.profile.user_id, kind="transfer", amount=amount, category="otros",
+                         description=f"Transferencia a {ACCOUNTS.get(target, (target,))[0]}", merchant=target,
+                         date=when or self.today.isoformat(), account=source, source=source_kind,
+                         necessity="esencial")
+        self.record(tx, alert=False)
+        return tx
 
     def change_account(self, tx: Transaction, account: str) -> Transaction:
         self._apply_balance(tx, -1)

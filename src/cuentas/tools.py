@@ -225,8 +225,22 @@ TOOLS: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "properties": {"desde": {"type": "string", "enum": ACCOUNT_KEYS},
-                           "hacia": {"type": "string", "enum": ACCOUNT_KEYS}, "monto": {"type": "number"}},
+                           "hacia": {"type": "string", "enum": ACCOUNT_KEYS}, "monto": {"type": "number"},
+                           "fecha": {**_DATE, "description": "Si no fue hoy (YYYY-MM-DD)"}},
             "required": ["desde", "hacia", "monto"],
+        },
+    },
+    {
+        "name": "listar_movimientos",
+        "description": "Lista los movimientos registrados (gastos, ingresos, transferencias), con filtros opcionales. Úsala cuando pida ver sus movimientos.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "desde": _DATE, "hasta": _DATE,
+                "cuenta": {"type": "string", "enum": ACCOUNT_KEYS},
+                "categoria": {"type": "string", "enum": ALL_CATEGORIES},
+                "orden": {"type": "string", "enum": ["antiguos_primero", "recientes_primero"]},
+            },
         },
     },
     {
@@ -410,6 +424,9 @@ class ToolExecutor:
                 category = "otros"
             tx_date = self._date(item["fecha"]) if item.get("fecha") else self.ledger.today
             if tx_date > self.ledger.today:
+                if not any("fecha futura" in n for n in self.notes):
+                    self.notes.append(f"📅 El {tx_date.day:02d}/{tx_date.month:02d} todavía no llega, así que lo "
+                                      "registré con fecha de hoy. Si fue otro día, dímelo y lo corrijo.")
                 tx_date = self.ledger.today
             account = item.get("cuenta") if accounts.is_valid(item.get("cuenta")) else ""
             if not account:
@@ -621,13 +638,36 @@ class ToolExecutor:
         source, target = self._account(args.get("desde")), self._account(args.get("hacia"))
         if source == target:
             raise ToolInputError("Las cuentas de origen y destino son la misma")
-        self.ledger.transfer(source, target, self._amount(args.get("monto")))
+        amount = self._amount(args.get("monto"))
+        if self.user_text and amount not in _amounts_in(self.user_text):
+            raise ToolInputError("El usuario no dijo ese monto: pregúntale cuánto transfirió")
+        when = self._date(args["fecha"]) if args.get("fecha") else self.ledger.today
+        tx = self.ledger.transfer(source, target, amount, min(when, self.ledger.today).isoformat(), self.source)
+        self.recorded.append(tx)
         accs = self.ledger.profile.accounts
-        return {"transferido": float(self._amount(args.get("monto"))),
-                "saldos": {accounts.label(k): float(accs[k]["saldo"]) for k in (source, target) if k in accs}}
+        return {"transferencia_registrada": True, "no_es_gasto": True,
+                "saldos_actualizados": [accounts.label(k) for k in (source, target) if k in accs]}
 
     def _t_consultar_cuentas(self, args: dict[str, Any]) -> dict[str, Any]:
-        return finance.accounts_summary(self.ledger.profile, self.ledger.month_transactions())
+        profile = self.ledger.profile
+        self.notes.append(finance.accounts_text(profile, self.ledger.month_transactions()))
+        return {"cuentas_con_saldo_conocido": [accounts.label(k) for k in profile.accounts],
+                "nota": ("El usuario ya recibió el detalle por cuenta. NO calcules ni inventes saldos: si una cuenta "
+                         "no tiene saldo conocido, invítalo a decirte su saldo real.")}
+
+    def _t_listar_movimientos(self, args: dict[str, Any]) -> dict[str, Any]:
+        ledger, profile = self.ledger, self.ledger.profile
+        end = self._date(args["hasta"]) if args.get("hasta") else ledger.today
+        start = self._date(args["desde"]) if args.get("desde") else end.replace(day=1)
+        txs = ledger.repo.list_transactions(profile.user_id, start.isoformat(), end.isoformat())
+        if args.get("cuenta"):
+            account = self._account(args["cuenta"])
+            txs = [t for t in txs if t.account == account or (t.kind == "transfer" and t.merchant == account)]
+        if args.get("categoria"):
+            txs = [t for t in txs if t.category == args["categoria"]]
+        txs.sort(key=lambda t: (t.date, t.created_at), reverse=args.get("orden") == "recientes_primero")
+        self.notes.append(finance.movements_text(profile, txs, start, end, args.get("cuenta")))
+        return {"cantidad": len(txs), "nota": "El usuario ya recibió la lista completa; no la repitas."}
 
     def _t_importar_pantallazo(self, args: dict[str, Any]) -> dict[str, Any]:
         if self.source != "image":

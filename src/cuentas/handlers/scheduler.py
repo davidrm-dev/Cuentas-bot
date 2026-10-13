@@ -142,7 +142,7 @@ def debt_reminder(profile: Profile, debt: Debt, today: date, ledger: Ledger, sub
     else:
         verb = "vence" if days >= 0 else "venció"
         text = f"⏰ Le debes <b>{amount}</b> a <b>{name}</b>; {verb} {when}."
-        spendable = finance.spendable_income(profile)
+        spendable = finance.spendable_income(profile, ledger.month_transactions())
         if spendable:
             # committed ya incluye esta deuda, así que lo que queda es después de pagarla.
             pockets = ledger.repo.list_pockets(profile.user_id)

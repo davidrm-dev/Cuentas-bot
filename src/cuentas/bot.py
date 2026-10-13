@@ -108,13 +108,18 @@ def confirmation_text(profile: Profile, recorded: list[Transaction], model_text:
     today = finance.today_for(profile).isoformat()
     lines = []
     for tx in recorded:
+        when = "" if tx.date == today else f" · {tx.date[8:]}/{tx.date[5:7]}"
+        if tx.kind == "transfer":
+            lines.append(f"🔁 Transferencia: <b>{fmt(tx.amount, cur)}</b> · {accounts.label(tx.account)} → "
+                         f"{accounts.label(tx.merchant)}{when} <i>(no es gasto)</i>")
+            continue
         verb = "Ingreso" if tx.kind == "income" else "Gasto"
         via = f" · {accounts.label(tx.account)}" if tx.account else ""
-        when = "" if tx.date == today else f" · {tx.date[8:]}/{tx.date[5:7]}"
         lines.append(f"✅ {verb}: <b>{fmt(tx.amount, cur)}</b> · {categories.label(tx.category)}{via}{when}")
         if tx.description:
             lines.append(f"<i>{html.escape(tx.description)}</i>")
-    accounts_used = {tx.account for tx in recorded if tx.account in profile.accounts}
+    accounts_used = {a for tx in recorded for a in (tx.account, tx.merchant if tx.kind == "transfer" else "")
+                     if a in profile.accounts}
     for acc in accounts_used:
         lines.append(f"Saldo en {accounts.ACCOUNTS[acc][0]}: {fmt(profile.accounts[acc]['saldo'], cur)}")
     questions = [s for s in re.split(r"(?<=[.!?])\s+", model_text) if s.strip().endswith("?")]
@@ -275,20 +280,7 @@ def handle_command(tg: Telegram, repo: Repository, profile: Profile, chat_id: in
         tg.send(chat_id, finance.savings_text(summary), keyboard=webapp_button("🐷 Ver en el dashboard"))
         return True
     if cmd == "/cuentas":
-        summary = finance.accounts_summary(profile, ledger.month_transactions())
-        cur = profile.currency
-        lines = ["🏦 <b>Tus cuentas</b>"]
-        if summary["saldos"]:
-            lines += [f"• {name}: <b>{fmt(v, cur)}</b>" for name, v in summary["saldos"].items()]
-            lines.append(f"Total: {fmt(summary['saldo_total_registrado'], cur)}")
-        else:
-            lines.append("Aún no me has dicho saldos. Ej: <i>tengo 300 mil en Nequi y 50 mil en efectivo</i>.")
-        if summary["gastado_este_mes_por_cuenta"]:
-            lines.append("\n<b>Gastado este mes por cuenta</b>")
-            lines += [f"• {name}: {fmt(v, cur)}" for name, v in summary["gastado_este_mes_por_cuenta"].items()]
-        if profile.default_account:
-            lines.append(f"\nCuenta principal: {accounts.label(profile.default_account)}")
-        tg.send(chat_id, "\n".join(lines))
+        tg.send(chat_id, finance.accounts_text(profile, ledger.month_transactions()))
         return True
     if cmd in ("/prestamos", "/deudas"):
         tg.send(chat_id, debts_text(profile, repo.list_debts(profile.user_id), ledger.today))
